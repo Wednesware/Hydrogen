@@ -1,6 +1,11 @@
 import sys, zipfile, shutil, os, pathlib, platform, stat
 from urllib.request import urlretrieve
 
+if len(sys.argv) == 1:
+    print("Usage: python Nitrogen <command> [args]")
+    print("Use 'python Nitrogen help' for a list of commands.")
+    sys.exit(0)
+
 match sys.argv[1]:
     case "get":
         if len(sys.argv) == 2:
