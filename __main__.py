@@ -13,7 +13,7 @@ match sys.argv[1]:
         urlretrieve(f"https://github.com/Wednesware/{sys.argv[2].capitalize()}/releases/{sys.argv[3] if len(sys.argv) > 3 else 'latest'}/download/{sys.argv[2].lower()}.zip", f"{sys.argv[2].lower()}.zip")
         with zipfile.ZipFile(f"{sys.argv[2].lower()}.zip", "r") as zip_ref:
             zip_ref.extractall(f"{sys.argv[2].lower()}-repo")
-        shutil.move(f"{sys.argv[2].lower()}-repo/{sys.argv[2].lower()}", f"{sys.argv[2].lower()}")
+        shutil.move(f"{sys.argv[2].lower()}-repo/{next(os.scandir(f'{sys.argv[2].lower()}-repo')).name}/{sys.argv[2].lower()}", f"{sys.argv[2].lower()}")
         shutil.rmtree(f"{sys.argv[2].lower()}-repo")
         os.remove(f"{sys.argv[2].lower()}.zip")
         while True:
