@@ -1,4 +1,4 @@
-import sys, zipfile, shutil, os, subprocess
+import sys, zipfile, shutil, os, pathlib, platform, stat
 from urllib.request import urlretrieve
 
 match sys.argv[1]:
@@ -19,19 +19,43 @@ match sys.argv[1]:
                     print("Add 'getnitrogen' command to reinstall Nitrogen whenever without taking up space? (y/n)")
                     choice2 = input("> ").lower()
                     if choice2 == "y":
-                        if shutil.which("git") is None:
-                            print("Error: Git is not installed or not in PATH.")
-                            sys.exit(1)
+                        nitrogen_repo_url: str = "https://github.com/Wednesware/Nitrogen.git"
+                        def install_linux():
+                            bin_dir = pathlib.Path.home() / ".local" / "bin"
+                            bin_dir.mkdir(parents=True, exist_ok=True)
 
-                        try:
-                            subprocess.run(
-                                ["git", "clone", "https://github.com/Wednesware/Nitrogen.git"],
-                                check=True
-                            )
-                            print("Nitrogen downloaded successfully. Run 'python nitrogen help' for usage instructions.")
-                        except subprocess.CalledProcessError as e:
-                            print(f"Git clone failed with exit code {e.returncode}")
-                            sys.exit(e.returncode)
+                            script_path = bin_dir / "getnitrogen"
+
+                            script_content = f"#!/bin/sh\ngit clone {nitrogen_repo_url}"
+                            script_path.write_text(script_content)
+                            script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
+
+                            print(f"Installed to {script_path}")
+                            print("Make sure ~/.local/bin is in your PATH")
+
+                        def install_windows():
+                            bin_dir = pathlib.Path(os.environ["LOCALAPPDATA"]) / "Programs" / "getnitrogen"
+                            bin_dir.mkdir(parents=True, exist_ok=True)
+
+                            script_path = bin_dir / "getnitrogen.cmd"
+
+                            script_content = f"git clone {nitrogen_repo_url}"
+
+                            script_path.write_text(script_content)
+
+                            print(f"Installed to {script_path}")
+                            print("Add this folder to PATH if not already:")
+                            print(str(bin_dir))
+                        system = platform.system().lower()
+
+                        if system == "linux":
+                            install_linux()
+                            print("\nDone. You can now run: getnitrogen")
+                        elif system == "windows":
+                            install_windows()
+                            print("\nDone. You can now run: getnitrogen")
+                        else:
+                            print(f"Unsupported OS: {system}")
                         break
                     elif choice2 == "n":
                         break
