@@ -17,6 +17,8 @@ match sys.argv[1]:
             sys.exit(1)
         with zipfile.ZipFile(f"{sys.argv[2].lower()}.zip", "r") as zip_ref:
             zip_ref.extractall(f"{sys.argv[2].lower()}-repo")
+        if os.path.exists(f"{sys.argv[2].lower()}"):
+            shutil.rmtree(f"{sys.argv[2].lower()}")
         shutil.move(f"{sys.argv[2].lower()}-repo/{next(os.scandir(f'{sys.argv[2].lower()}-repo')).name}/{sys.argv[2].lower()}", f"{sys.argv[2].lower()}")
         shutil.rmtree(f"{sys.argv[2].lower()}-repo")
         os.remove(f"{sys.argv[2].lower()}.zip")
