@@ -1,4 +1,4 @@
-import sys, zipfile, shutil, os, pathlib, platform, stat
+import sys, zipfile, shutil, os, urllib.error
 from urllib.request import urlretrieve
 
 if len(sys.argv) == 1:
@@ -10,7 +10,11 @@ match sys.argv[1]:
     case "get":
         if len(sys.argv) == 2:
             print("Usage: python Nitrogen get <publication> [release (latest by default)]")
-        urlretrieve(f"https://github.com/Wednesware/{sys.argv[2].capitalize()}/releases/{sys.argv[3] if len(sys.argv) > 3 else 'latest'}/download/{sys.argv[2].lower()}.zip", f"{sys.argv[2].lower()}.zip")
+        try:
+            urlretrieve(f"https://github.com/Wednesware/{sys.argv[2].capitalize()}/releases/{sys.argv[3] if len(sys.argv) > 3 else 'latest'}/download/{sys.argv[2].lower()}.zip", f"{sys.argv[2].lower()}.zip")
+        except urllib.error.HTTPError:
+            print(f"Error: Could not find release '{sys.argv[3] if len(sys.argv) > 3 else 'latest'}' for publication '{sys.argv[2].capitalize()}'. Are you sure you spelled it right?")
+            sys.exit(1)
         with zipfile.ZipFile(f"{sys.argv[2].lower()}.zip", "r") as zip_ref:
             zip_ref.extractall(f"{sys.argv[2].lower()}-repo")
         shutil.move(f"{sys.argv[2].lower()}-repo/{next(os.scandir(f'{sys.argv[2].lower()}-repo')).name}/{sys.argv[2].lower()}", f"{sys.argv[2].lower()}")
