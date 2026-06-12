@@ -1,4 +1,4 @@
-import sys, zipfile, shutil, os, urllib.error, subprocess
+import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, time
 from urllib.request import urlretrieve
 
 if len(sys.argv) == 1:
@@ -9,27 +9,37 @@ if len(sys.argv) == 1:
 def install(pub: str, rel: str, getdep: str) -> None:
     print(f"Now installing: {pub.lower()}-{rel}")
     try:
-        urlretrieve(f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub.lower()}.zip", f"{pub.lower()}.zip")
-    except urllib.error.HTTPError:
-        print(f"Error: Could not find release '{rel}' for publication '{pub.capitalize()}'. Are you sure you spelled it right?")
-        sys.exit(1)
-    with zipfile.ZipFile(f"{pub.lower()}.zip", "r") as zip_ref:
-        zip_ref.extractall(f"{pub.lower()}-repo")
-    if os.path.exists(f"{pub.lower()}"):
-        shutil.rmtree(f"{pub.lower()}")
-    shutil.move(f"{pub.lower()}-repo/{next(os.scandir(f'{pub.lower()}-repo')).name}/{pub.lower()}", f"{pub.lower()}")
-    shutil.rmtree(f"{pub.lower()}-repo")
-    os.remove(f"{pub.lower()}.zip")
-    print(f"\033[92m  Installation complete!\033[0m")
-    try:
-        if getdep == "yes" or (getdep == "ask" and input(f"\033[94m  Run 'getdep' on this new installation to get sub-dependencies? (Y/n) \033[0m").strip().lower() in ["y", "yes", "yeah", "true", "t", ""]):
-            print("\033[94m  Installing sub-dependencies...")
-            output: str = subprocess.run(["python", __file__, "getdep", pub], capture_output=True)
-            for line in output.stdout.decode().split("\n"):
-                print(f"  {line}")
-    except (KeyboardInterrupt, EOFError):
-        print()
-        exit(0)
+        try:
+            urlretrieve(f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub.lower()}.zip", f"{pub.lower()}.zip")
+        except urllib.error.HTTPError:
+            print(f"Error: Could not find release '{rel}' for publication '{pub.capitalize()}'. Are you sure you spelled it right?")
+            sys.exit(1)
+        with zipfile.ZipFile(f"{pub.lower()}.zip", "r") as zip_ref:
+            zip_ref.extractall(f"{pub.lower()}-repo")
+        dirname: str = f"{pub.lower()}{rel.replace('.', '_').replace('-', '_')}" if rel != "latest" else pub.lower()
+        if os.path.exists(dirname):
+            shutil.rmtree(dirname)
+        shutil.move(f"{pub.lower()}-repo/{next(os.scandir(f'{pub.lower()}-repo')).name}/{pub.lower()}", dirname)
+        shutil.rmtree(f"{pub.lower()}-repo")
+        os.remove(f"{pub.lower()}.zip")
+        print(f"\033[92m  Installation complete!\033[0m")
+        try:
+            if getdep == "yes" or (getdep == "ask" and input(f"\033[94m  Run 'getdep' on this new installation to get sub-dependencies? (Y/n) \033[0m").strip().lower() in ["y", "yes", "yeah", "true", "t", ""]):
+                print("\033[94m  Installing sub-dependencies...\033[0m")
+                output: str = subprocess.run(["python", __file__, "getdep", dirname], capture_output=True)
+                for line in output.stdout.decode().split("\n"):
+                    print(f"  {line}")
+                for line in output.stderr.decode().split("\n"):
+                    if line.strip():
+                        print(f"\033[91m  {line}\033[0m")
+        except (KeyboardInterrupt, EOFError):
+            print()
+            exit(0)
+    except Exception:
+        for line in traceback.format_exc().split("\n"):
+            if line.strip():
+                print(f"\033[91m  {line}\033[0m")
+
 
 match sys.argv[1]:
     case "get":
@@ -40,7 +50,7 @@ match sys.argv[1]:
     case "getdep":
         nitrodep_path: str = os.path.join(sys.argv[2] if len(sys.argv) > 2 else "", ".nitrodep")
         if not os.path.isfile(nitrodep_path):
-            print(f"\033[92mNo dependencies needed or no dependency file found at '{nitrodep_path}'\033[0m")
+            print(f"No dependency file found at '{nitrodep_path}'")
             sys.exit(0)
         with open(nitrodep_path) as file:
             content: str = file.read()
@@ -48,7 +58,7 @@ match sys.argv[1]:
             print("\033[92mNo dependencies needed!\033[0m")
             sys.exit(0)
         else:
-            deps: list[tuple[str, str]] = [(line.split()[0].strip(), line.split()[1].strip() if len(line.split()) > 1 else "latest") for line in content.split("\n")]
+            deps: list[tuple[str, str]] = [(line.split()[0].strip(), line.split()[1].strip() if len(line.split()) > 1 else "latest") for line in content.split("\n") if line.strip()]
         print(f"Dependencies loaded: {len(deps)} ! {deps}")
         for dep in deps:
             install(*dep, getdep="yes")
