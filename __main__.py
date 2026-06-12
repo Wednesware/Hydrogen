@@ -7,7 +7,7 @@ if len(sys.argv) == 1:
     sys.exit(0)
 
 def install(pub: str, rel: str, getdep: str) -> None:
-    print(f"Now installing: {pub} {rel}")
+    print(f"Now installing: {pub.lower()}-{rel}")
     try:
         urlretrieve(f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub.lower()}.zip", f"{pub.lower()}.zip")
     except urllib.error.HTTPError:
@@ -20,12 +20,16 @@ def install(pub: str, rel: str, getdep: str) -> None:
     shutil.move(f"{pub.lower()}-repo/{next(os.scandir(f'{pub.lower()}-repo')).name}/{pub.lower()}", f"{pub.lower()}")
     shutil.rmtree(f"{pub.lower()}-repo")
     os.remove(f"{pub.lower()}.zip")
-    print(f"\033[92m  {pub.capitalize()} {rel}: Installation complete!\033[0m")
-    if getdep == "yes" or (getdep == "ask" and input(f"\033[94m  Run 'getdep' on this new installation to get sub-dependencies? (y/n) \033[0m").lower() in ["y", "yes", "yeah", "true", "t"]):
-        print("\033[94m  Installing sub-dependencies...")
-        output: str = subprocess.run(["python", __file__, "getdep", f"{pub}/.nitrodep"], capture_output=True)
-        for line in output.stdout.decode().split("\n"):
-            print(f"  {line}")
+    print(f"\033[92m  Installation complete!\033[0m")
+    try:
+        if getdep == "yes" or (getdep == "ask" and input(f"\033[94m  Run 'getdep' on this new installation to get sub-dependencies? (Y/n) \033[0m").strip().lower() in ["y", "yes", "yeah", "true", "t", ""]):
+            print("\033[94m  Installing sub-dependencies...")
+            output: str = subprocess.run(["python", __file__, "getdep", pub], capture_output=True)
+            for line in output.stdout.decode().split("\n"):
+                print(f"  {line}")
+    except (KeyboardInterrupt, EOFError):
+        print()
+        exit(0)
 
 match sys.argv[1]:
     case "get":
@@ -34,9 +38,9 @@ match sys.argv[1]:
         install(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "latest", sys.argv[4] if len(sys.argv) > 4 else "ask")
         print("Run 'rm -rf nitrogen' to remove this installer.")
     case "getdep":
-        nitrodep_path: str = sys.argv[2] if len(sys.argv) > 2 else ".nitrodep"
+        nitrodep_path: str = os.path.join(sys.argv[2] if len(sys.argv) > 2 else "", ".nitrodep")
         if not os.path.isfile(nitrodep_path):
-            print("\033[92mNo dependencies needed or no dependency file found!\033[0m")
+            print(f"\033[92mNo dependencies needed or no dependency file found at '{nitrodep_path}'\033[0m")
             sys.exit(0)
         with open(nitrodep_path) as file:
             content: str = file.read()
