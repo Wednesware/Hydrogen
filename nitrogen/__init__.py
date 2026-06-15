@@ -10,8 +10,8 @@ PUBLICATION_CACHE: dict[int, str] = {
 }
 
 def parsepub(pub: str) -> str:
-    if pub in PUBLICATION_CACHE:
-        return PUBLICATION_CACHE[pub]
+    if pub.lower() in PUBLICATION_CACHE:
+        return PUBLICATION_CACHE[pub.lower()]
     return pub
 
 def install(pub: str, rel: str, getdep: str) -> None:
