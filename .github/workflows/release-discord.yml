@@ -15,7 +15,7 @@ jobs:
           RELEASE_NAME: ${{ github.event.release.name }}
           URL: ${{ github.event.release.html_url }}
           REPO: ${{ github.repository }}
-          REPO_NAME: $(echo "${{ github.repository }}" | cut -d'/' -f2)
+          REPO_NAME: ${{ github.repository.name }}
         run: |
           curl -H "Content-Type: application/json" \
           -X POST \
