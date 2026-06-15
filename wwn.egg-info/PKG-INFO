@@ -1,0 +1,28 @@
+Metadata-Version: 2.4
+Name: wwn
+Version: 26.19
+Summary: Easy, ultra-light-weight installer for Wednesware publications. Built for single-use and multi-use installations.
+Home-page: https://github.com/wednesware/nitrogen
+Author: Wednesware
+Author-email: wednesware@gmail.com
+Classifier: Programming Language :: Python :: 3
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: OS Independent
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE.md
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: license-file
+Dynamic: requires-python
+Dynamic: summary
+
+# Wednesware Nitrogen
+
+Easy, ultra-light-weight installer for Wednesware publications. Built for single-use and multi-use installations.
+
+## /!\ This publication does not require Wednesware Magnesium to run.

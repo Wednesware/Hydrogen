@@ -1,8 +1,14 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="nitro",
+    name="wwn",
     version="26.19",
+    py_modules=["cli"],
+    entry_points={
+        "console_scripts": [
+            "n2=nitrogen:main",
+        ],
+    },
     author="Wednesware",
     author_email="wednesware@gmail.com",
     description="Easy, ultra-light-weight installer for Wednesware publications. Built for single-use and multi-use installations.",
