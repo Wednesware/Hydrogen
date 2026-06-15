@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name="wwn",
     version="26.19",
-    py_modules=["cli"],
+    py_modules=[],
     entry_points={
         "console_scripts": [
             "n2=nitrogen:main",

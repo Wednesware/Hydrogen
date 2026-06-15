@@ -3,15 +3,15 @@ from urllib.request import urlretrieve
 
 
 PUBLICATION_CACHE: dict[int, str] = {
-    7: "nitrogen",
-    12: "magnesium",
-    2: "helium",
-    3: "lithium"
+    "n": "nitrogen",
+    "mg": "magnesium",
+    "he": "helium",
+    "li": "lithium"
 }
 
 def parsepub(pub: str) -> str:
-    if pub.isnumeric() and int(pub) in PUBLICATION_CACHE:
-        return PUBLICATION_CACHE[int(pub)]
+    if pub in PUBLICATION_CACHE:
+        return PUBLICATION_CACHE[pub]
     return pub
 
 def install(pub: str, rel: str, getdep: str) -> None:
