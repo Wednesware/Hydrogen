@@ -11,7 +11,7 @@ setup(
     },
     author="Wednesware",
     author_email="wednesware@gmail.com",
-    description="Easy, ultra-light-weight installer for Wednesware publications. Built for single-use and multi-use installations.",
+    description="Easy, ultra-lightweight installer for Wednesware publications.",
     long_description=open("README.md", "r", encoding="utf-8").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/wednesware/nitrogen",
