@@ -27,10 +27,10 @@ This publication does not require [Wednesware Magnesium](https://wednesware.gith
 
 ## Usage:
 
-`n2 get <publication> [release (latest by default)] [get subdependencies? (y/n)]` - Download a Wednesware publication from GitHub.
-* Example usage: `n2 get magnesium 26.3 n` (installs Magnesium version 26.3 without installing sub-dependencies)
-* Tip: you can use the chemical symbol for all publications to get them faster. Example: `n2 get mg 26.3 n`
-`n2 getdep [path]` - Smart-install all dependencies from a .nitrodep file.
-* Example usage: `n2 getdep helium` (installs all dependencies required by Helium)
-`n2 readme` - Prints the contents of the README.md file.
-`n2 help` - Prints a formatted help message to the terminal.
+* `n2 get <publication> [release (latest by default)] [get subdependencies? (y/n)]` - Download a Wednesware publication from GitHub.
+  * Example usage: `n2 get magnesium 26.3 n` (installs Magnesium version 26.3 without installing sub-dependencies)
+  * Tip: you can use the chemical symbol for all publications to get them faster. Example: `n2 get mg 26.3 n`
+*  `n2 getdep [path]` - Smart-install all dependencies from a .nitrodep file.
+  * Example usage: `n2 getdep helium` (installs all dependencies required by Helium)
+* `n2 readme` - Prints the contents of the README.md file.
+* `n2 help` - Prints a formatted help message to the terminal.
