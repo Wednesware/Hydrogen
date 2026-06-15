@@ -64,6 +64,11 @@ jobs:
           name: release-dists
           path: dist/
 
+      - name: Check distributions
+        run: |
+          python -m pip install twine
+          twine check dist/*
+
       - name: Publish release distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
