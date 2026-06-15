@@ -14,14 +14,13 @@ jobs:
           WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           RELEASE_NAME: ${{ github.event.release.name }}
           URL: ${{ github.event.release.html_url }}
-          REPO: ${{ github.repository }}
-          REPO_NAME: ${{ github.repository.name }}
+          REPO_NAME: 
         run: |
           curl -H "Content-Type: application/json" \
           -X POST \
           -d "{
             \"embeds\": [{
-              \"title\": \"🚀 $REPO_NAME $RELEASE_NAME out now!\",
+              \"title\": \"🚀 Nitrogen $RELEASE_NAME out now!\",
               \"description\": \"\",
               \"url\": \"$URL\",
               \"color\": 5814783
