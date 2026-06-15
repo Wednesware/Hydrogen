@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="wwn",
-    version="26.24",
+    version="26.25",
     py_modules=[],
     entry_points={
         "console_scripts": [
