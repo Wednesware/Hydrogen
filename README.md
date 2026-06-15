@@ -1,5 +1,5 @@
 # Wednesware Nitrogen
 
-Easy, ultra-light-weight installer for Wednesware publications. Built for single-use and multi-use installations.
+Easy, ultra-lightweight installer for Wednesware publications.
 
 ## /!\ This publication does not require Wednesware Magnesium to run.
