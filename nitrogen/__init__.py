@@ -83,7 +83,7 @@ def main() -> None:
             print("Usage: n2 <command> [args]")
             print("Commands:")
             print("  get <publication> [release (latest by default)] [get subdependencies? (y/n)] - Download a Wednesware publication from GitHub")
-            print("  getdep [path] - Smart-install all dependencies from a .nitrodep file.")
+            print("  getdep [path] - Smart-install all dependencies from a .nitrodep file")
             print("  readme - Show the README file")
             print("  help - Show this help message")
         case _:
