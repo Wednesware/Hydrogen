@@ -14,7 +14,7 @@ This publication does not require [Wednesware Magnesium](https://wednesware.gith
 * `git clone https://github.com/Wednesware/Nitrogen.git nitrogen`
 
 ### From Github via browser (local install, run with `python -m nitrogen.nitrogen`):
-* [Click here to install the latest Nitrogen release as a zip file](https://github.com/Wednesware/Nitrogen/releases/latest/download/nitrogen.zip)
+* [Click here to install the latest Nitrogen release as a zip file](https://github.com/Wednesware/Nitrogen/releases/latest/download/nitrogen.zip) [or click here to browse releases](https://github.com/Wednesware/Nitrogen/releases).
 * Unpack using `bsdtar -xf nitrogen.zip`
 
 ## Upgrade methods:
