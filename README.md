@@ -6,9 +6,13 @@ This publication does not require [Wednesware Magnesium](https://wednesware.gith
 
 ## Installation methods:
 
-### From PyPI (recommended, global install, run with `n2`):
+
+### From PyPI via pipx (recommended, global install, run with `n2`):
+* `pipx install wwn`
+
+### From PyPI via pip (virtual environment install, run with `n2`):
 * `pip install wwn`
-* Note: You may need to create a virtual environment first on some machines. [Learn how to do this here.](https://docs.python.org/3/library/venv.html)
+* Note: You may need to create a virtual environment for this method first on some machines. [Learn how to do this here.](https://docs.python.org/3/library/venv.html)
 
 ### From GitHub via terminal (local install, run with `python -m nitrogen.nitrogen`):
 * `git clone https://github.com/Wednesware/Nitrogen.git nitrogen`
