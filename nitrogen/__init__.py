@@ -6,8 +6,12 @@ PUBLICATION_CACHE: dict[str, str] = {
     "n": "nitrogen",
     "mg": "magnesium",
     "he": "helium",
+    "na": "sodium",
+    "kr": "krypton",
+    "o": "oxygen",
     "li": "lithium",
-    "o": "oxygen"
+    "h": "hydrogen",
+    "i": "iodine"
 }
 
 REVERSE_PUBLICATION_CACHE: dict[str, str] = {v: k for k, v in PUBLICATION_CACHE.items()}
