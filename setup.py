@@ -1,8 +1,10 @@
 from setuptools import setup, find_packages
 
+from nitrogen import VERSION
+
 setup(
     name="wwn",
-    version="26.26",
+    version=VERSION,
     py_modules=[],
     entry_points={
         "console_scripts": [

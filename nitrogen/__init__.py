@@ -2,6 +2,8 @@ import sys, zipfile, shutil, os, urllib.error, subprocess, traceback
 from urllib.request import urlretrieve
 
 
+VERSION: str = "26.28"
+
 PUBLICATION_CACHE: dict[str, str] = {
     "n": "nitrogen",
     "mg": "magnesium",
@@ -11,7 +13,8 @@ PUBLICATION_CACHE: dict[str, str] = {
     "o": "oxygen",
     "li": "lithium",
     "h": "hydrogen",
-    "i": "iodine"
+    "i": "iodine",
+    "in": "indium"
 }
 
 REVERSE_PUBLICATION_CACHE: dict[str, str] = {v: k for k, v in PUBLICATION_CACHE.items()}
@@ -28,19 +31,17 @@ def install(pub: str, rel: str, getdep: str) -> None:
         try:
             urlretrieve(f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub.lower()}.zip", f"{pub.lower()}.zip")
         except urllib.error.HTTPError:
-            print(f"Error: Could not find release '{rel}' for publication '{pub.capitalize()}'. Are you sure you spelled it right?")
+            print(f"\033[91m  Could not find release '{rel}' for publication '{pub.capitalize()}'. Are you sure you spelled it right?")
             sys.exit(1)
         with zipfile.ZipFile(f"{pub.lower()}.zip", "r") as zip_ref:
             zip_ref.extractall(f"{pub.lower()}-repo")
-        dirname: str = f"{pub.lower()}{rel.replace('.', '_').replace('-', '_')}" if rel != "latest" else pub.lower()
-        altdirname: str = f"{REVERSE_PUBLICATION_CACHE[pub.lower()]}{rel.replace('.', '_').replace('-', '_')}" if rel != "latest" else REVERSE_PUBLICATION_CACHE[pub.lower()]
+        dirname: str = f"ww/{REVERSE_PUBLICATION_CACHE[pub.lower()]}{rel.replace('.', '_').replace('-', '_')}" if rel != "latest" else f"ww/{REVERSE_PUBLICATION_CACHE[pub.lower()]}"
+        if not os.path.exists("ww"):
+            os.mkdir("ww")
         if os.path.exists(dirname):
             shutil.rmtree(dirname)
-        if os.path.exists(altdirname):
-            shutil.rmtree(altdirname)
         shutil.move(f"{pub.lower()}-repo/{next(os.scandir(f'{pub.lower()}-repo')).name}/{pub.lower()}", dirname)
         shutil.rmtree(f"{pub.lower()}-repo")
-        shutil.copytree(dirname, altdirname)
         os.remove(f"{pub.lower()}.zip")
         print(f"\033[92m  Installation complete!\033[0m")
         try:
@@ -62,6 +63,7 @@ def install(pub: str, rel: str, getdep: str) -> None:
 
 def main() -> None:
     if len(sys.argv) == 1:
+        print(f"Nitrogen (wwn/n2) by Wednesware v{VERSION}")
         print("Usage: n2 <command> [args]")
         print("Use 'n2 help' for a list of commands.")
         sys.exit(0)
@@ -77,18 +79,40 @@ def main() -> None:
                 print("Usage: n2 rm <publication> [release (latest by default)]")
                 sys.exit(1)
             pub: str = parsepub(sys.argv[2])
-            if len(sys.argv) > 3:
-                rel: str = sys.argv[3]
-                dirname: str = f"{pub.lower()}{rel.replace('.', '_').replace('-', '_')}"
-                altdirname: str = f"{REVERSE_PUBLICATION_CACHE[pub.lower()]}{rel.replace('.', '_').replace('-', '_')}"
-                if os.path.exists(dirname):
-                    shutil.rmtree(dirname)
-                if os.path.exists(altdirname):
-                    shutil.rmtree(altdirname)
+            print(f"Now deleting: {pub}")
+            if pub.strip() == "all":
+                if os.path.exists("ww"):
+                    shutil.rmtree("ww")
+                else:
+                    print("  No publications installed.")
+            elif pub in PUBLICATION_CACHE or pub in REVERSE_PUBLICATION_CACHE:
+                if len(sys.argv) > 3:
+                    rel: str = sys.argv[3]
+                    dirname: str = f"ww/{pub.lower()}{rel.replace('.', '_').replace('-', '_')}"
+                    altdirname: str = f"ww/{REVERSE_PUBLICATION_CACHE[pub.lower()]}{rel.replace('.', '_').replace('-', '_')}"
+                    deleted: int = 0
+                    if os.path.exists(dirname):
+                        shutil.rmtree(dirname)
+                        deleted += 1
+                    if os.path.exists(altdirname):
+                        shutil.rmtree(altdirname)
+                        deleted += 1
+                    if deleted:
+                        print("\033[92m  Operation complete.")
+                    else:
+                        print(f"  Release '{rel}' of publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?")
+                else:
+                    deleted: int = 0
+                    for path in os.listdir("ww"):
+                        if path.startswith(pub.lower()) or path.startswith(REVERSE_PUBLICATION_CACHE[pub.lower()]):
+                            shutil.rmtree(os.path.join("ww", path))
+                            deleted += 1
+                    if deleted:
+                        print("\033[92m  Operation complete.")
+                    else:
+                        print(f"  Publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?")
             else:
-                for path in os.listdir():
-                    if path.startswith(pub.lower()) or path.startswith(REVERSE_PUBLICATION_CACHE[pub.lower()]):
-                        shutil.rmtree(path)
+                print(f"  Could not find publication '{pub.capitalize()}'. Are you sure you spelled it right?")
         case "getdep":
             nitrodep_path: str = os.path.join(sys.argv[2] if len(sys.argv) > 2 else "", ".nitrodep")
             if not os.path.isfile(nitrodep_path):
