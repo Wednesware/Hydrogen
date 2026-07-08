@@ -205,6 +205,12 @@ def main() -> None:
         print("Use 'n2 help' for a list of commands.")
         sys.exit(0)
 
+    if not os.path.exists(EXTENSIONS_DIR):
+        os.makedirs(EXTENSIONS_DIR)
+    if not os.path.exists(TRUSTED_EXTENSIONS_FILE):
+        with open(TRUSTED_EXTENSIONS_FILE, "w") as file:
+            file.write("")
+    
     match sys.argv[1]:
         case "get":
             if len(sys.argv) == 2:
