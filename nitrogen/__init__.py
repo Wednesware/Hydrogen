@@ -2,7 +2,7 @@ import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.30"
+VERSION: str = "26.31"
 PUBLICATION_CACHE: dict[str, str] = {
     "n": "nitrogen",
     "mg": "magnesium",
