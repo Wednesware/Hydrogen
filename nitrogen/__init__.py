@@ -2,7 +2,7 @@ import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.32"
+VERSION: str = "26.33"
 PUBLICATION_CACHE: dict[str, str] = {
     "n": "nitrogen",
     "mg": "magnesium",
@@ -13,7 +13,8 @@ PUBLICATION_CACHE: dict[str, str] = {
     "li": "lithium",
     "h": "hydrogen",
     "i": "iodine",
-    "in": "indium"
+    "in": "indium",
+    "ne": "neon"
 }
 REVERSE_PUBLICATION_CACHE: dict[str, str] = {v: k for k, v in PUBLICATION_CACHE.items()}
 EXTENSIONS_DIR: str = os.path.join(os.path.dirname(__file__), "extensions")
