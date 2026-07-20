@@ -206,6 +206,12 @@ def main() -> None:
         print("Use 'n2 help' for a list of commands.")
         sys.exit(0)
 
+    if not os.path.exists(EXTENSIONS_DIR):
+        os.makedirs(EXTENSIONS_DIR)
+    if not os.path.exists(TRUSTED_EXTENSIONS_FILE):
+        with open(TRUSTED_EXTENSIONS_FILE, "w") as file:
+            file.write("")
+    
     match sys.argv[1]:
         case "get":
             if len(sys.argv) == 2:
@@ -252,7 +258,7 @@ def main() -> None:
             else:
                 print(f"  Could not find publication '{pub.capitalize()}'. Are you sure you spelled it right?")
         case "getdep":
-            path: str = sys.argv[2] if len(sys.argv) > 2 else ".nitrodep"
+            path: str = (sys.argv[2] if len(sys.argv) > 2 else ".") + "/.nitrodep"
             getdep(path)
         case "build":
             if len(sys.argv) == 2:
