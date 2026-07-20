@@ -2,7 +2,7 @@ import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.33"
+VERSION: str = "26.34"
 PUBLICATION_CACHE: dict[str, str] = {
     "n": "nitrogen",
     "mg": "magnesium",
@@ -52,7 +52,7 @@ def install(pub: str, rel: str, do_getdep: str, reinstall: bool = True, color: b
             try:
                 if do_getdep in ["y", "yes", "yeah", "true", "t"] or (do_getdep == "ask" and pub.lower() not in ["magnesium", "nitrogen"] and input(f"{'\033[94m' if color else ''}  Run 'getdep' on this new installation to get sub-dependencies? (Y/n) {'\033[0m' if color else ''}").strip().lower() in ["y", "yes", "yeah", "true", "t", ""]):
                     print(f"{'\033[94m' if color else ''}  Installing sub-dependencies...{'\033[0m' if color else ''}")
-                    output: subprocess.CompletedProcess = subprocess.run(["python", __file__, "getdep", dirname], capture_output=True)
+                    output: subprocess.CompletedProcess = subprocess.run(["python", __file__, "getdep", os.path.join(dirname, ".nitrodep")], capture_output=True)
                     for line in output.stdout.decode().split("\n"):
                         print(f"  {line}")
                     for line in output.stderr.decode().split("\n"):
