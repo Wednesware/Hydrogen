@@ -2,10 +2,7 @@
 
 Easy, ultra-lightweight installer for Wednesware publications.
 
-This publication does not require [Wednesware Magnesium](https://wednesware.github.io/home#magnesium) to run, and includes small.
-
 ## Installation methods:
-
 
 ### From PyPI via pipx (recommended, global install, run with `n2`):
 * `pipx install wwn`
