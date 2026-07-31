@@ -7,6 +7,10 @@ Easy, ultra-lightweight installer for Wednesware publications.
 ### From PyPI via pipx (recommended, global install, run with `n2`):
 * `pipx install wwn`
 
+### From AUR via an AUR helper (best for arch linux, endeavouros, manjaro or garuda linux users, global install, run with `n2`):
+* `yay -S n2`
+* You may alternatively also use `paru`, `pikaur`, or any other AUR helper to install Nitrogen from the AUR instead of `yay`.
+
 ### From PyPI via pip (virtual environment or global install, run with `n2`):
 * `pip install wwn`
 * Note: You may need to create a virtual environment for this method first on some machines. [Learn how to do this here.](https://docs.python.org/3/library/venv.html)
