@@ -2,7 +2,7 @@ import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.35"
+VERSION: str = "26.36"
 PUBLICATION_CACHE: dict[str, str] = {
     "n": "nitrogen",
     "mg": "magnesium",
@@ -258,7 +258,7 @@ def main() -> None:
             else:
                 print(f"  Could not find publication '{pub.capitalize()}'. Are you sure you spelled it right?")
         case "getdep":
-            path: str = (sys.argv[2] if len(sys.argv) > 2 else ".") + "/.nitrodep"
+            path: str = (sys.argv[2] if len(sys.argv) > 2 else ".").removesuffix(".nitrodep") + "/.nitrodep"
             getdep(path)
         case "build":
             if len(sys.argv) == 2:

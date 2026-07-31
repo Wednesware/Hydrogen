@@ -1,10 +1,10 @@
 Metadata-Version: 2.4
 Name: wwn
-Version: 26.35
+Version: 26.36
 Summary: Easy, ultra-lightweight installer for Wednesware publications.
-Home-page: https://wednesware.github.io#nitrogen
+Home-page: https://wednesware.org/nitrogen
 Author: Wednesware
-Author-email: wednesware@gmail.com
+Author-email: team@wednesware.org
 License: MIT
 Classifier: Programming Language :: Python :: 3
 Classifier: Operating System :: OS Independent
