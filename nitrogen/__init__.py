@@ -1,8 +1,17 @@
-import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile
+import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile, asyncio
+from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.37"
+VERSION: str = "26.38"
+CLI_RESET: str = "\033[0m"
+CLI_BOLD: str = "\033[1m"
+CLI_DIM: str = "\033[90m"
+CLI_INFO: str = "\033[94m"
+CLI_SUCCESS: str = "\033[92m"
+CLI_WARNING: str = "\033[93m"
+CLI_ERROR: str = "\033[91m"
+
 PUBLICATION_CACHE: dict[str, str] = {
     "n": "nitrogen",
     "mg": "magnesium",
@@ -21,67 +30,279 @@ EXTENSIONS_DIR: str = os.path.join(os.path.dirname(__file__), "extensions")
 TRUSTED_EXTENSIONS_FILE: str = os.path.join(os.path.dirname(__file__), ".TRUSTED_EXTENSIONS")
 LEN_PATH: str = os.path.join(os.path.dirname(__file__), "ww", "len")
 
+running_installs: dict[tuple[str, str], asyncio.Task] = {}
+
+
+@dataclass(slots=True)
+class InstallResult:
+    status: str
+    lines: list[str]
+    exit_code: int = 0
+
+
+def _cli(text: str, color: str = "", bold: bool = False) -> str:
+    prefix: str = f"{CLI_BOLD if bold else ''}{color}"
+    return f"{prefix}{text}{CLI_RESET if prefix else ''}"
+
+
+def _print_status(label: str, message: str, tone: str = "info") -> None:
+    palette: dict[str, str] = {
+        "info": CLI_INFO,
+        "success": CLI_SUCCESS,
+        "warning": CLI_WARNING,
+        "error": CLI_ERROR,
+        "muted": CLI_DIM,
+    }
+    color: str = palette.get(tone, "")
+    print(f"{_cli(f'[{label}]', color, bold=True)} {message}")
+
+
+def _print_section(title: str) -> None:
+    print(_cli(title, CLI_BOLD))
+
+
+def _print_command(signature: str, description: str) -> None:
+    print(f"  {_cli(signature, CLI_INFO)} {_cli('-', CLI_DIM)} {description}")
+
+
+def _print_help() -> None:
+    print(_cli(f"Nitrogen v{VERSION}", CLI_INFO, bold=True))
+    print(_cli("Wednesware package manager and extension runner", CLI_DIM))
+    print()
+    _print_section("Usage")
+    print("  n2 <command> [args]")
+    print()
+    _print_section("General")
+    _print_command("get <publication> [release]", "Download a Wednesware publication from GitHub.")
+    _print_command("rm <publication> [release]", "Delete one release or all installed releases for a publication.")
+    _print_command("getdep [path]", "Install dependencies from a .nitrodep file, including nested ones.")
+    _print_command("build <format> [source] [output]", "Build the current Nitrogen project into a distributable format.")
+    print()
+    _print_section("Documentation")
+    _print_command("readme [extension]", "Show the README for Nitrogen or an installed extension.")
+    _print_command("license [extension]", "Show the license for Nitrogen or an installed extension.")
+    _print_command("help", "Show this help message.")
+    print()
+    _print_section("Extensions")
+    _print_command("list-ext", "List installed extensions and their local paths.")
+    _print_command("trust-ext <extension>", "Trust an extension so it can run without confirmation.")
+    _print_command("untrust-ext <extension>", "Remove trust for an extension.")
+    _print_command("install-ext <extension>", "Install an extension from LEN.")
+    _print_command("uninstall-ext <extension>", "Remove an installed extension.")
+    _print_command("list-len", "List available extensions in LEN.")
+    _print_command("load-len", "Clone the LEN repository locally.")
+    _print_command("unload-len", "Remove the local LEN checkout.")
+
+
+def _print_installed_extensions() -> None:
+    _print_section("Installed extensions")
+    sent: bool = False
+    for ext_filename in [item for item in os.listdir(EXTENSIONS_DIR) if item.endswith(".n2x")]:
+        print(f"  {_cli(ext_filename, CLI_INFO)} {_cli('->', CLI_DIM)} {os.path.join(EXTENSIONS_DIR, ext_filename)}")
+        sent = True
+    if not sent:
+        _print_status("empty", "No extensions were detected.", "warning")
+
+
+def _print_len_extensions() -> None:
+    _print_section("Available extensions")
+    printed: bool = False
+    for ext_filename in [item for item in os.listdir(LEN_PATH) if item.endswith(".n2x")]:
+        print(f"  {_cli(ext_filename, CLI_INFO)} {_cli('->', CLI_DIM)} https://github.com/Wednesware/LEN/blob/main/{ext_filename}")
+        printed = True
+    if not printed:
+        _print_status("empty", "No extensions were detected in the LEN repository.", "warning")
+
+
+def _print_extension_commands() -> None:
+    _print_section("Custom commands")
+    printed: bool = False
+    for ext_path in [item for item in os.listdir(EXTENSIONS_DIR) if item.endswith(".n2x")]:
+        print(f"  {_cli(ext_path.removesuffix('.n2x'), CLI_INFO)} {_cli('-', CLI_DIM)} Provided by '{ext_path}' at '{os.path.join(EXTENSIONS_DIR, ext_path)}'")
+        printed = True
+    if not printed:
+        print(f"  {_cli('(none installed)', CLI_DIM)}")
+
 def parsepub(pub: str) -> str:
     if pub.lower() in PUBLICATION_CACHE:
         return PUBLICATION_CACHE[pub.lower()]
     return pub
 
-def install(pub: str, rel: str, do_getdep: str, reinstall: bool = True, color: bool = True) -> None:
-    pub = parsepub(pub)
-    print(f"Now installing: {pub.lower()}-{rel}")
-    try:
-        try:
-            urlretrieve(f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub.lower()}.zip", f"{pub.lower()}.zip")
-        except urllib.error.HTTPError:
-            print(f"{'\033[91m' if color else ''}  Could not find release '{rel}' for publication '{pub.capitalize()}'. Are you sure you spelled it right?{'\033[0m' if color else ''}")
-            sys.exit(1)
-        with zipfile.ZipFile(f"{pub.lower()}.zip", "r") as zip_ref:
-            zip_ref.extractall(f"{pub.lower()}-repo")
-        dirname: str = f"ww/{REVERSE_PUBLICATION_CACHE[pub.lower()]}{rel.replace('.', '_').replace('-', '_')}" if rel != "latest" else f"ww/{REVERSE_PUBLICATION_CACHE[pub.lower()]}"
-        if os.path.exists(dirname) and not reinstall:
-            print(f"{'\033[94m' if color else ''}  Publication '{pub.capitalize()}' is already installed.{'\033[0m' if color else ''}")
+
+def _publication_dirname(pub: str, rel: str) -> str:
+    pub_key: str = REVERSE_PUBLICATION_CACHE.get(pub.lower(), pub.lower())
+    if rel == "latest":
+        return f"ww/{pub_key}"
+    return f"ww/{pub_key}{rel.replace('.', '_').replace('-', '_')}"
+
+
+def _release_token(rel: str) -> str:
+    return rel.replace(".", "_").replace("-", "_")
+
+
+def _dependency_file_path(path: str) -> str:
+    if path.endswith(".nitrodep"):
+        return path
+    return os.path.join(path, ".nitrodep")
+
+
+def _print_install_result(result: InstallResult, color: bool = True) -> None:
+    labels: dict[str, str] = {
+        "info": "skip",
+        "success": "done",
+        "error": "fail",
+    }
+    palette: dict[str, str] = {
+        "info": CLI_INFO,
+        "success": CLI_SUCCESS,
+        "error": CLI_ERROR,
+    }
+    prefix: str = palette.get(result.status, "") if color else ""
+    label: str = labels.get(result.status, "info")
+    for line in result.lines:
+        if prefix:
+            print(f"{_cli(f'[{label}]', prefix, bold=True)} {line}")
         else:
-            if not os.path.exists("ww"):
-                os.mkdir("ww")
-            if os.path.exists(dirname):
-                shutil.rmtree(dirname)
-            shutil.move(f"{pub.lower()}-repo/{next(os.scandir(f'{pub.lower()}-repo')).name}/{pub.lower()}", dirname)
-            shutil.rmtree(f"{pub.lower()}-repo")
-            os.remove(f"{pub.lower()}.zip")
-            print(f"{'\033[92m' if color else ''}  Installation complete!{'\033[0m' if color else ''}")
-            try:
-                if do_getdep in ["y", "yes", "yeah", "true", "t"] or (do_getdep == "ask" and pub.lower() not in ["magnesium", "nitrogen"] and input(f"{'\033[94m' if color else ''}  Run 'getdep' on this new installation to get sub-dependencies? (Y/n) {'\033[0m' if color else ''}").strip().lower() in ["y", "yes", "yeah", "true", "t", ""]):
-                    print(f"{'\033[94m' if color else ''}  Installing sub-dependencies...{'\033[0m' if color else ''}")
-                    output: subprocess.CompletedProcess = subprocess.run(["python", __file__, "getdep", os.path.join(dirname, ".nitrodep")], capture_output=True)
-                    for line in output.stdout.decode().split("\n"):
-                        print(f"  {line}")
-                    for line in output.stderr.decode().split("\n"):
-                        if line.strip():
-                            print(f"{'\033[91m' if color else ''}  {line}{'\033[0m' if color else ''}")
-            except (KeyboardInterrupt, EOFError):
-                print()
-                exit(0)
+            print(f"[{label}] {line}")
+
+
+def _install_publication(pub: str, rel: str, reinstall: bool = True) -> InstallResult:
+    pub = parsepub(pub)
+    pub_lower: str = pub.lower()
+    dirname: str = _publication_dirname(pub, rel)
+    release_token: str = _release_token(rel)
+    archive_path: str = f"{pub_lower}-{release_token}.zip"
+    extract_dir: str = f"{pub_lower}-repo-{release_token}"
+
+    try:
+        if os.path.exists(dirname) and not reinstall:
+            return InstallResult("info", [f"{pub_lower} {rel}: Publication is already installed."])
+
+        try:
+            urlretrieve(
+                f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub_lower}.zip",
+                archive_path,
+            )
+        except urllib.error.HTTPError:
+            return InstallResult(
+                "error",
+                [f"{pub_lower} {rel}: Could not find this release. Are you sure you spelled it right?"],
+                1,
+            )
+
+        with zipfile.ZipFile(archive_path, "r") as zip_ref:
+            zip_ref.extractall(extract_dir)
+        if not os.path.exists("ww"):
+            os.mkdir("ww")
+        if os.path.exists(dirname):
+            shutil.rmtree(dirname)
+
+        source_root: str = next(os.scandir(extract_dir)).name
+        shutil.move(os.path.join(extract_dir, source_root, pub_lower), dirname)
+        return InstallResult("success", [f"{pub_lower} {rel}: Installation complete!"])
     except Exception:
-        for line in traceback.format_exc().split("\n"):
-            if line.strip():
-                print(f"\033[91m  {line}\033[0m")
-                
-def getdep(path: str, reinstall: bool = True, color: bool = True, log: bool = True) -> None:
-    if not os.path.isfile(path):
-        print(f"No dependency file found at '{path}'")
+        return InstallResult(
+            "error",
+            [line for line in traceback.format_exc().split("\n") if line.strip()],
+            1,
+        )
+    finally:
+        if os.path.exists(extract_dir):
+            shutil.rmtree(extract_dir)
+        if os.path.exists(archive_path):
+            os.remove(archive_path)
+
+
+def _queue_install(pub: str, rel: str, reinstall: bool = True) -> asyncio.Task:
+    resolved_pub: str = parsepub(pub)
+    key: tuple[str, str] = (resolved_pub.lower(), rel)
+    if key in running_installs:
+        _print_status("wait", f"Already queued {resolved_pub.lower()} {rel}", "muted")
+        return running_installs[key]
+
+    _print_status("queue", f"{resolved_pub.lower()} {rel}", "info")
+    task: asyncio.Task = asyncio.create_task(asyncio.to_thread(_install_publication, resolved_pub, rel, reinstall))
+    running_installs[key] = task
+
+    def cleanup(completed_task: asyncio.Task, install_key: tuple[str, str] = key) -> None:
+        if running_installs.get(install_key) is completed_task:
+            running_installs.pop(install_key, None)
+
+    task.add_done_callback(cleanup)
+    return task
+
+
+async def install_async(pub: str, rel: str, reinstall: bool = True, color: bool = True, emit: bool = True, fatal: bool = True) -> InstallResult:
+    result: InstallResult = await _queue_install(pub, rel, reinstall)
+    if emit:
+        _print_install_result(result, color)
+    if fatal and result.exit_code:
+        raise SystemExit(result.exit_code)
+    return result
+
+
+async def _getdep_recursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[tuple[str, str]] | None = None) -> None:
+    dep_path: str = _dependency_file_path(path)
+    if visited is None:
+        visited = set()
+    if installed is None:
+        installed = set()
+    resolved_path: str = os.path.realpath(dep_path)
+    if resolved_path in visited:
         return
-    with open(path) as file:
+    visited.add(resolved_path)
+
+    if not os.path.isfile(dep_path):
+        _print_status("miss", f"No dependency file found at '{dep_path}'", "warning")
+        return
+    with open(dep_path) as file:
         content: str = file.read()
     if not content.strip():
         if log:
-            print(f"{'\033[92m' if color else ''}No dependencies needed!{'\033[0m' if color else ''}")
+            _print_status("done", "No dependencies needed.", "success")
         return
-    else:
-        deps: list[tuple[str, str]] = [(line.split()[0].strip(), line.split()[1].strip() if len(line.split()) > 1 else "latest") for line in content.split("\n") if line.strip()]
+
+    deps: list[tuple[str, str]] = [(line.split()[0].strip(), line.split()[1].strip() if len(line.split()) > 1 else "latest") for line in content.split("\n") if line.strip()]
     if log:
-        print(f"Dependencies loaded: {len(deps)} ! {deps}")
-    for dep in deps:
-        install(*dep, do_getdep="yes", reinstall=reinstall)
+        _print_status("deps", f"Loaded {len(deps)} dependenc{'y' if len(deps) == 1 else 'ies'} from {dep_path}", "info")
+    pending_deps: list[tuple[str, str]] = []
+    for pub, rel in deps:
+        dep_key: tuple[str, str] = (parsepub(pub).lower(), rel)
+        if dep_key in installed:
+            continue
+        installed.add(dep_key)
+        pending_deps.append((pub, rel))
+
+    tasks: list[asyncio.Task] = [_queue_install(pub, rel, rel == "latest") for pub, rel in pending_deps]
+    results: list[InstallResult] = await asyncio.gather(*tasks)
+    for result in results:
+        _print_install_result(result, color)
+
+    failures: int = sum(1 for result in results if result.exit_code)
+    if failures:
+        if log:
+            _print_status("fail", f"Dependency install finished with {failures} failure(s).", "error")
+        raise SystemExit(1)
+
+    for pub, rel in deps:
+        installed_dep_path: str = _dependency_file_path(_publication_dirname(parsepub(pub), rel))
+        await _getdep_recursive(installed_dep_path, color=color, log=False, visited=visited, installed=installed)
+
+    if log:
+        _print_status("done", "All dependencies are ready.", "success")
+                
+async def getdep(path: str, color: bool = True, log: bool = True) -> None:
+    await _getdep_recursive(path, color=color, log=log)
+
+
+async def _install_subdependencies(pub: str, rel: str, color: bool = True) -> None:
+    resolved_pub: str = parsepub(pub)
+    dep_path: str = _dependency_file_path(_publication_dirname(resolved_pub, rel))
+    _print_status("deps", f"Checking sub-dependencies for {resolved_pub.lower()} {rel}", "info")
+    if not os.path.isfile(dep_path):
+        _print_status("info", "No sub-dependencies declared.", "muted")
+        return
+    await getdep(dep_path, color=color, log=True)
         
 def trust(ext_filename: str, ext_dir_path: str) -> None:
     ext_path: str = os.path.join(EXTENSIONS_DIR, ext_filename)
@@ -105,7 +326,7 @@ def load_len() -> None:
     try:
         if os.path.exists(LEN_PATH):
             unload_len()
-        print("\033[94mLoading LEN from GitHub...\033[0m")
+        _print_status("sync", "Loading LEN from GitHub...", "info")
         proc = subprocess.Popen(
             [
                 "git",
@@ -120,35 +341,36 @@ def load_len() -> None:
         )
 
         for line in proc.stdout:
-            print(f"\033[90m  {line.rstrip()}\033[0m")
+            print(_cli(f"  {line.rstrip()}", CLI_DIM))
         if proc.returncode != 0 and proc.returncode is not None:
             raise subprocess.CalledProcessError(proc.returncode, proc.args)
         proc.wait()
-        print("\033[92m  LEN loaded successfully.\033[0m")
+        _print_status("done", "LEN loaded successfully.", "success")
     except subprocess.CalledProcessError:
-        print("\033[91m  Could not load LEN from GitHub. Are you sure you have an internet connection?\033[0m")
+        _print_status("fail", "Could not load LEN from GitHub. Are you sure you have an internet connection?", "error")
         sys.exit(1)
         
 def unload_len() -> None:
     if os.path.exists(LEN_PATH):
         shutil.rmtree(LEN_PATH)
-        print("\033[92mLEN unloaded.\033[0m")
+        _print_status("done", "LEN unloaded.", "success")
     else:
-        print("LEN is not loaded.\033[0m")
+        _print_status("info", "LEN is not loaded.", "muted")
 
-def build(format: str, source_path: str = ".", output_path: str = "build.%") -> None:
-    print("Preparing build...")
+async def build(format: str, source_path: str = ".", output_path: str = "build.%") -> None:
+    _print_status("build", "Preparing build...", "info")
     try:
         output_path = output_path.replace("%", {
             "zip": "zip",
             "targz": "tar.gz",
-            "n2x": "n2x"
+            "n2x": "n2x",
+            "na": "..."
         }[format])
     except KeyError:
-        print(f"\033[91m  Unknown build format '{format}'.\033[0m")
+        _print_status("fail", f"Unknown build format '{format}'.", "error")
         return
     if not os.path.isdir(source_path):
-        print(f"\033[91m  Source path '{source_path}' does not exist or is not a directory.\033[0m")
+        _print_status("fail", f"Source path '{source_path}' does not exist or is not a directory.", "error")
         return
     source_abs: str = os.path.abspath(source_path)
     output_abs: str = os.path.abspath(output_path)
@@ -161,7 +383,7 @@ def build(format: str, source_path: str = ".", output_path: str = "build.%") -> 
 
     match format:
         case "zip":
-            print(f"\033[94m  Building project into {output_path}...\033[0m")
+            _print_status("build", f"Building project into {output_path}...", "info")
             with zipfile.ZipFile(output_abs, "w", zipfile.ZIP_DEFLATED) as zipf:
                 for root, dirs, files in os.walk(source_abs):
                     for file in files:
@@ -169,11 +391,11 @@ def build(format: str, source_path: str = ".", output_path: str = "build.%") -> 
                         if should_skip(file_path):
                             continue
                         arcname = os.path.relpath(file_path, source_abs)
-                        print(f"  Packing '{arcname}'...")
+                        print(f"  {_cli('pack', CLI_DIM)} {arcname}")
                         zipf.write(file_path, arcname)
-            print(f"\033[92m    Build complete in {output_path}\033[0m")
+            _print_status("done", f"Build complete in {output_path}", "success")
         case "targz":
-            print(f"\033[94m  Building project into {output_path}...\033[0m")
+            _print_status("build", f"Building project into {output_path}...", "info")
             with tarfile.open(output_abs, "w:gz") as tar:
                 for root, dirs, files in os.walk(source_abs):
                     for file in files:
@@ -181,29 +403,69 @@ def build(format: str, source_path: str = ".", output_path: str = "build.%") -> 
                         if should_skip(file_path):
                             continue
                         arcname = os.path.relpath(file_path, source_abs)
-                        print(f"  Packing '{arcname}'...")
+                        print(f"  {_cli('pack', CLI_DIM)} {arcname}")
                         tar.add(file_path, arcname=arcname)
-            print(f"\033[92m    Build complete in {output_path}\033[0m")
+            _print_status("done", f"Build complete in {output_path}", "success")
         case "n2x":
-            print(f"\033[94m  Building project into {output_path}...\033[0m")
+            _print_status("build", f"Building project into {output_path}...", "info")
             required_files = ["ext.py", "README.md", "LICENSE.md", ".nitrodep"]
             with tarfile.open(output_abs, "w:gz") as tar:
                 for file in required_files:
                     file_path = os.path.join(source_abs, file)
-                    print(f"  Packing '{file}'...")
+                    print(f"  {_cli('pack', CLI_DIM)} {file}")
                     if not os.path.isfile(file_path):
-                        print(f"\033[91m    Required file for build not found: '{file}'\033[0m")
+                        _print_status("fail", f"Required file for build not found: '{file}'", "error")
                         return
                     tar.add(file_path, arcname=file)
-            print(f"\033[92m    Build complete in {output_path}\033[0m")
+            _print_status("done", f"Build complete in {output_path}", "success")
+        case "na":
+            _print_status("deps", "Installing build dependencies...", "info")
+            await asyncio.gather(
+                install_async("magnesium", "26.11", False),
+                install_async("iodine", "26.2", False),
+            )
+            from ww.i26_2 import run # type: ignore
+            from ww.i26_2.widgets.text_input import TextInput # type: ignore
+            with open("testsetup.py", "w") as file:
+                file.write(f"""
+from setuptools import setup, find_packages
+                           
+setup(
+    name="{run(TextInput('Project name: ', placeholder='myproject'))}",
+    version="{run(TextInput('Project version: ', placeholder='26.1'))}",
+    py_modules=[],
+    entry_points={{
+        "console_scripts": [
+            "{run(TextInput('Commands (separate with ,): ', placeholder='myprjct=myproject.cli:main'))}",
+        ],
+    }},
+    author="{run(TextInput('Author name: ', placeholder='Your Name'))}",
+    author_email="{run(TextInput('Author email: ', placeholder='you@email.com'))}",
+    description="{run(TextInput('Short, one-line description: ', placeholder='...'))}",
+    long_description=open("README.md", "r", encoding="utf-8").read(),
+    long_description_content_type="text/markdown",
+    url="{run(TextInput('Project URL (example: GitHub page): ', placeholder='https://myproject.com'))}",
+    packages=find_packages(),
+    install_requires=[],
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "Operating System :: OS Independent",
+    ],
+    python_requires=">=3.12",
+    license="MIT"
+)              
+""".strip())
+            shutil.rmtree("ww/i26_2")
         case _:
-            print(f"\033[91m  Unknown build format '{format}'.\033[0m")
+            _print_status("fail", f"Unknown build format '{format}'.", "error")
 
-def main() -> None:
+async def main() -> None:
     if len(sys.argv) == 1:
-        print(f"Nitrogen (wwn/n2) by Wednesware v{VERSION}")
+        print(_cli(f"Nitrogen v{VERSION}", CLI_INFO, bold=True))
+        print(_cli("Wednesware package manager and extension runner", CLI_DIM))
+        print()
         print("Usage: n2 <command> [args]")
-        print("Use 'n2 help' for a list of commands.")
+        print(f"Run {_cli('n2 help', CLI_INFO)} for a full command list.")
         sys.exit(0)
 
     if not os.path.exists(EXTENSIONS_DIR):
@@ -215,20 +477,24 @@ def main() -> None:
     match sys.argv[1]:
         case "get":
             if len(sys.argv) == 2:
-                print("Usage: n2 get <publication> [release (latest by default)]")
+                _print_status("help", "Usage: n2 get <publication> [release]", "warning")
                 sys.exit(1)
-            install(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "latest", sys.argv[4] if len(sys.argv) > 4 else "ask")
+            pub: str = sys.argv[2]
+            rel: str = sys.argv[3] if len(sys.argv) > 3 else "latest"
+            result: InstallResult = await install_async(pub, rel)
+            if not result.exit_code:
+                await _install_subdependencies(pub, rel)
         case "rm":
             if len(sys.argv) == 2:
-                print("Usage: n2 rm <publication> [release (latest by default)]")
+                _print_status("help", "Usage: n2 rm <publication> [release]", "warning")
                 sys.exit(1)
             pub: str = parsepub(sys.argv[2])
-            print(f"Now deleting: {pub}")
+            _print_status("rm", f"Deleting {pub}", "info")
             if pub.strip() == "all":
                 if os.path.exists("ww"):
                     shutil.rmtree("ww")
                 else:
-                    print("  No publications installed.")
+                    _print_status("info", "No publications installed.", "muted")
             elif pub in PUBLICATION_CACHE or pub in REVERSE_PUBLICATION_CACHE:
                 if len(sys.argv) > 3:
                     rel: str = sys.argv[3]
@@ -242,9 +508,9 @@ def main() -> None:
                         shutil.rmtree(altdirname)
                         deleted += 1
                     if deleted:
-                        print("\033[92m  Operation complete.")
+                        _print_status("done", "Operation complete.", "success")
                     else:
-                        print(f"  Release '{rel}' of publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?")
+                        _print_status("miss", f"Release '{rel}' of publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
                 else:
                     deleted: int = 0
                     for path in os.listdir("ww"):
@@ -252,19 +518,19 @@ def main() -> None:
                             shutil.rmtree(os.path.join("ww", path))
                             deleted += 1
                     if deleted:
-                        print("\033[92m  Operation complete.")
+                        _print_status("done", "Operation complete.", "success")
                     else:
-                        print(f"  Publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?")
+                        _print_status("miss", f"Publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
             else:
-                print(f"  Could not find publication '{pub.capitalize()}'. Are you sure you spelled it right?")
+                _print_status("miss", f"Could not find publication '{pub.capitalize()}'. Are you sure you spelled it right?", "warning")
         case "getdep":
             path: str = (sys.argv[2] if len(sys.argv) > 2 else ".").removesuffix(".nitrodep") + "/.nitrodep"
-            getdep(path)
+            await getdep(path)
         case "build":
             if len(sys.argv) == 2:
-                print("Usage: n2 build <format(zip|targz|n2x)> [source path] [output path]")
+                _print_status("help", "Usage: n2 build <format(zip|targz|n2x|na)> [source path] [output path]", "warning")
                 sys.exit(1)
-            build(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ".", sys.argv[4] if len(sys.argv) > 4 else "build.%")
+            await build(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ".", sys.argv[4] if len(sys.argv) > 4 else "build.%")
         case "readme":
             if len(sys.argv) == 2:
                 with open(os.path.join(os.path.dirname(__file__), "README.md")) as file:
@@ -287,7 +553,7 @@ def main() -> None:
                 print(file.read())
         case "trust-ext":
             if len(sys.argv) == 2:
-                print("Usage: n2 trust <extension>")
+                _print_status("help", "Usage: n2 trust-ext <extension>", "warning")
                 sys.exit(1)
             ext_filename: str = sys.argv[2] + ".n2x"
             ext_path: str = os.path.join(EXTENSIONS_DIR, ext_filename)
@@ -295,82 +561,46 @@ def main() -> None:
             trust(ext_filename, ext_dir_path)
         case "untrust-ext":
             if len(sys.argv) == 2:
-                print("Usage: n2 untrust <extension>")
+                _print_status("help", "Usage: n2 untrust-ext <extension>", "warning")
                 sys.exit(1)
             ext_filename: str = sys.argv[2] + ".n2x"
             with open(TRUSTED_EXTENSIONS_FILE, "w") as file:
                 content: str = file.read()    
             file.write("\n".join([line for line in content.split("\n") if line.strip() != ext_filename]))
         case "list-ext":
-            print("Installed extensions:")
-            sent: bool = False
-            for ext_filename in [item for item in os.listdir(EXTENSIONS_DIR) if item.endswith(".n2x")]:
-                print(f"  {ext_filename} - {os.path.join(EXTENSIONS_DIR, ext_filename)}")
-                sent = True
-            if not sent:
-                print("\033[91m  No extensions were detected.\033[0m")
+            _print_installed_extensions()
         case "load-len":
             load_len()
         case "unload-len":
             unload_len()
         case "install-ext":
             if len(sys.argv) == 2:
-                print("Usage: n2 install-ext <extension>")
+                _print_status("help", "Usage: n2 install-ext <extension>", "warning")
                 sys.exit(1)
             load_len()
             if os.path.exists(os.path.join(LEN_PATH, sys.argv[2] + ".n2x" if not sys.argv[2].endswith(".n2x") else sys.argv[2])):
                 shutil.copy(os.path.join(LEN_PATH, sys.argv[2] + ".n2x"), EXTENSIONS_DIR)
-                print(f"\033[92m  Extension '{sys.argv[2]}' installed successfully.\033[0m")
+                _print_status("done", f"Extension '{sys.argv[2]}' installed successfully.", "success")
             else:
-                print(f"\033[91m  Extension '{sys.argv[2]}' not found in the LEN repository.\033[0m")
+                _print_status("miss", f"Extension '{sys.argv[2]}' not found in the LEN repository.", "warning")
         case "uninstall-ext":
             if len(sys.argv) == 2:
-                print("Usage: n2 uninstall-ext <extension>")
+                _print_status("help", "Usage: n2 uninstall-ext <extension>", "warning")
                 sys.exit(1)
             ext_filename: str = sys.argv[2] + ".n2x" if not sys.argv[2].endswith(".n2x") else sys.argv[2]
             ext_path: str = os.path.join(EXTENSIONS_DIR, ext_filename)
             if os.path.exists(ext_path):
                 os.remove(ext_path)
-                print(f"\033[92m  Extension '{sys.argv[2]}' uninstalled successfully.\033[0m")
+                _print_status("done", f"Extension '{sys.argv[2]}' uninstalled successfully.", "success")
             else:
-                print(f"\033[91m  Extension '{sys.argv[2]}' not installed.\033[0m")
+                _print_status("miss", f"Extension '{sys.argv[2]}' not installed.", "warning")
         case "list-len":
             load_len()
-            print("Available extensions:")
-            printed: bool = False
-            for ext_filename in [item for item in os.listdir(LEN_PATH) if item.endswith(".n2x")]:
-                print(f"  {ext_filename} - https://github.com/Wednesware/LEN/blob/main/{ext_filename}")
-                printed = True
-            if not printed:
-                print("\033[91m  No extensions were detected in the LEN repository.\033[0m")
+            _print_len_extensions()
         case "help":
-            print("Usage: n2 <command> [args]")
-            print("General commands:")
-            print("  get <publication> [release (latest by default)] [get subdependencies? (y/n)] - Download a Wednesware publication from GitHub")
-            print("  rm <publication> [release (all by default)] - Delete all releases or a specific release of a publication from the current directory.")
-            print("  getdep [path] - Smart-install all dependencies from a .nitrodep file")
-            print("  build <format (zip|targz|n2x)> [source path] [output path] - Build the current Nitrogen project into a distributable format.")
-            print("Documentation/info commands:")
-            print("  readme [extension] - Show the README file of an extension. If no extension is specified, show the README of Nitrogen itself.")
-            print("  license [extension] - Show the license of an extension. If no extension is specified, show the license of Nitrogen itself.")
-            print("  list-ext - List all installed extensions and their paths.")
-            print("  help - Show this help message")
-            print("Extension management commands:")
-            print("  trust-ext <extension> - Trust an extension so that it can be run without confirmation. Only use this for extensions you have reviewed and trust.")
-            print("  untrust-ext <extension> - Untrust an extension so that it will require confirmation before running.")
-            print("  LEN-based commands:")
-            print("    load-len - Load the LEN repository from GitHub. Other LEN-based commands will do this automatically.")
-            print("    unload-len - Unload the LEN repository from the current directory.")
-            print("    install-ext <extension> - Download an extension from LEN.")
-            print("    uninstall-ext <extension> - Uninstall an extension.")
-            print("    list-len - List available extensions in the LEN repository.")
-            print("Custom commands (via extensions):")
-            printed: bool = False
-            for ext_path in [item for item in os.listdir(EXTENSIONS_DIR) if item.endswith(".n2x")]:
-                print(f"  {ext_path.removesuffix('.n2x')} - Provided by the extension '{ext_path}' at '{os.path.join(EXTENSIONS_DIR, ext_path)}'")
-                printed = True
-            if not printed:
-                print("  (none installed)")
+            _print_help()
+            print()
+            _print_extension_commands()
         case _:
             for ext_filename2 in [item for item in os.listdir(EXTENSIONS_DIR) if item.endswith(".n2x") or item.endswith(".n2xp")]:
                 ext_path2: str = os.path.join(EXTENSIONS_DIR, ext_filename2)
@@ -386,7 +616,7 @@ def main() -> None:
                             nitrodep_path: str = os.path.join(ext_dir_path, ".nitrodep")
                             if os.path.exists(nitrodep_path):
                                 print("\033[94m", end="", flush=True)
-                                getdep(nitrodep_path, reinstall=False, log=False)
+                                await getdep(nitrodep_path, log=False)
                                 print("\033[0m", end="", flush=True)
                             subprocess.run(["python", script_path, *sys.argv[2:]])
                             if os.path.exists(ext_dir_path):
@@ -397,9 +627,6 @@ def main() -> None:
                     except Exception:
                         for line in traceback.format_exc().split("\n"):
                             if line.strip():
-                                print(f"\033[91m  {line}\033[0m")
-            print(f"Unknown command: {sys.argv[1]}")
-            print("Use 'n2 help' for a list of commands.")
-
-if __name__ == "__main__":
-    main()
+                                print(_cli(f"  {line}", CLI_ERROR))
+            _print_status("miss", f"Unknown command: {sys.argv[1]}", "warning")
+            print(f"Run {_cli('n2 help', CLI_INFO)} for a list of commands.")
