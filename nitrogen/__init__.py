@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.38"
+VERSION: str = "26.39"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -67,7 +67,7 @@ def _print_command(signature: str, description: str) -> None:
 
 def _print_help() -> None:
     print(_cli(f"Nitrogen v{VERSION}", CLI_INFO, bold=True))
-    print(_cli("Wednesware package manager and extension runner", CLI_DIM))
+    print(_cli("Quick installer for Wednesware publications", CLI_DIM))
     print()
     _print_section("Usage")
     print("  n2 <command> [args]")
@@ -462,7 +462,7 @@ setup(
 async def main() -> None:
     if len(sys.argv) == 1:
         print(_cli(f"Nitrogen v{VERSION}", CLI_INFO, bold=True))
-        print(_cli("Wednesware package manager and extension runner", CLI_DIM))
+        print(_cli("Quick installer for Wednesware publications", CLI_DIM))
         print()
         print("Usage: n2 <command> [args]")
         print(f"Run {_cli('n2 help', CLI_INFO)} for a full command list.")
@@ -630,3 +630,6 @@ async def main() -> None:
                                 print(_cli(f"  {line}", CLI_ERROR))
             _print_status("miss", f"Unknown command: {sys.argv[1]}", "warning")
             print(f"Run {_cli('n2 help', CLI_INFO)} for a list of commands.")
+            
+def entrypoint() -> None:
+    asyncio.run(main())

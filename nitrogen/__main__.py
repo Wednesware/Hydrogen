@@ -1,6 +1,4 @@
-import asyncio
-
-from . import main
+from . import entrypoint
 
 
-asyncio.run(main())
+entrypoint()

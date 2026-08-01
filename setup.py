@@ -8,7 +8,7 @@ setup(
     py_modules=[],
     entry_points={
         "console_scripts": [
-            "n2=nitrogen:main",
+            "n2=nitrogen:entrypoint",
         ],
     },
     author="Wednesware",
