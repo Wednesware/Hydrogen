@@ -39,6 +39,7 @@ Easy, ultra-lightweight installer for Wednesware publications.
   * Example usage: `n2 rm magnesium 26.3` (deletes `./magnesium26_3` and `./mg26_3` only if present)
   * Or: `n2 rm magnesium` (deletes all files in `.` matching `magnesium*` or `mg*`)
   * Tip: you can use chemical symbols here too.
-*  `n2 getdep [path]` - Smart-install all dependencies from a .nitrodep file.
+*  `n2 getdep [path]` - Smart-install missing dependencies from a .nitrodep file.
   * Example usage: `n2 getdep helium` (installs all dependencies required by Helium)
+*  `n2 forcegetdep [path]` - Smart-install all dependencies, regardless of whether they are already installed, from a .nitrodep file, including nested ones, forcing reinstallation of all dependencies.
 * `n2 help` - Prints a formatted help message to the terminal.

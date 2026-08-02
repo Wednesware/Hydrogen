@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.39"
+VERSION: str = "26.40"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -23,7 +23,41 @@ PUBLICATION_CACHE: dict[str, str] = {
     "h": "hydrogen",
     "i": "iodine",
     "in": "indium",
-    "ne": "neon"
+    "ne": "neon",
+    "c": "carbon",
+    "b": "boron",
+    "f": "fluorine",
+    "s": "sulfur",
+    "p": "phosphorus",
+    "cl": "chlorine",
+    "ar": "argon",
+    "k": "potassium",
+    "ca": "calcium",
+    "sc": "scandium",
+    "ti": "titanium",
+    "v": "vanadium",
+    "cr": "chromium",
+    "mn": "manganese",
+    "fe": "iron",
+    "co": "cobalt",
+    "ni": "nickel",
+    "cu": "copper",
+    "zn": "zinc",
+    "ga": "gallium",
+    "ge": "germanium",
+    "as": "arsenic",
+    "se": "selenium",
+    "br": "bromine",
+    "rb": "rubidium",
+    "sr": "strontium",
+    "y": "yttrium",
+    "zr": "zirconium",
+    "nb": "niobium",
+    "mo": "molybdenum",
+    "tc": "technetium",
+    "ru": "ruthenium",
+    "rh": "rhodium",
+    "pd": "palladium"
 }
 REVERSE_PUBLICATION_CACHE: dict[str, str] = {v: k for k, v in PUBLICATION_CACHE.items()}
 EXTENSIONS_DIR: str = os.path.join(os.path.dirname(__file__), "extensions")
@@ -75,7 +109,8 @@ def _print_help() -> None:
     _print_section("General")
     _print_command("get <publication> [release]", "Download a Wednesware publication from GitHub.")
     _print_command("rm <publication> [release]", "Delete one release or all installed releases for a publication.")
-    _print_command("getdep [path]", "Install dependencies from a .nitrodep file, including nested ones.")
+    _print_command("getdep [path]", "Install missing dependencies from a .nitrodep file, including nested ones.")
+    _print_command("forcegetdep [path]", "Install all dependencies, regardless of whether they are already installed from a .nitrodep file, including nested ones, forcing reinstallation of all dependencies.")
     _print_command("build <format> [source] [output]", "Build the current Nitrogen project into a distributable format.")
     print()
     _print_section("Documentation")
@@ -241,7 +276,7 @@ async def install_async(pub: str, rel: str, reinstall: bool = True, color: bool 
     return result
 
 
-async def _getdep_recursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[tuple[str, str]] | None = None) -> None:
+async def _getdep_recursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[tuple[str, str]] | None = None, force: bool = False) -> None:
     dep_path: str = _dependency_file_path(path)
     if visited is None:
         visited = set()
@@ -273,7 +308,7 @@ async def _getdep_recursive(path: str, color: bool = True, log: bool = True, vis
         installed.add(dep_key)
         pending_deps.append((pub, rel))
 
-    tasks: list[asyncio.Task] = [_queue_install(pub, rel, rel == "latest") for pub, rel in pending_deps]
+    tasks: list[asyncio.Task] = [_queue_install(pub, rel, (rel == "latest") or force) for pub, rel in pending_deps]
     results: list[InstallResult] = await asyncio.gather(*tasks)
     for result in results:
         _print_install_result(result, color)
@@ -291,8 +326,8 @@ async def _getdep_recursive(path: str, color: bool = True, log: bool = True, vis
     if log:
         _print_status("done", "All dependencies are ready.", "success")
                 
-async def getdep(path: str, color: bool = True, log: bool = True) -> None:
-    await _getdep_recursive(path, color=color, log=log)
+async def getdep(path: str, color: bool = True, log: bool = True, force: bool = False) -> None:
+    await _getdep_recursive(path, color=color, log=log, force=force)
 
 
 async def _install_subdependencies(pub: str, rel: str, color: bool = True) -> None:
@@ -364,7 +399,7 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
             "zip": "zip",
             "targz": "tar.gz",
             "n2x": "n2x",
-            "na": "..."
+            "py": "py"
         }[format])
     except KeyError:
         _print_status("fail", f"Unknown build format '{format}'.", "error")
@@ -418,7 +453,7 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
                         return
                     tar.add(file_path, arcname=file)
             _print_status("done", f"Build complete in {output_path}", "success")
-        case "na":
+        case "py":
             _print_status("deps", "Installing build dependencies...", "info")
             await asyncio.gather(
                 install_async("magnesium", "26.11", False),
@@ -426,7 +461,7 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
             )
             from ww.i26_2 import run # type: ignore
             from ww.i26_2.widgets.text_input import TextInput # type: ignore
-            with open("testsetup.py", "w") as file:
+            with open(output_path, "w") as file:
                 file.write(f"""
 from setuptools import setup, find_packages
                            
@@ -436,7 +471,7 @@ setup(
     py_modules=[],
     entry_points={{
         "console_scripts": [
-            "{run(TextInput('Commands (separate with ,): ', placeholder='myprjct=myproject.cli:main'))}",
+            "{run(TextInput('Command: ', placeholder='myprjct=myproject.cli:main'))}",
         ],
     }},
     author="{run(TextInput('Author name: ', placeholder='Your Name'))}",
@@ -526,9 +561,12 @@ async def main() -> None:
         case "getdep":
             path: str = (sys.argv[2] if len(sys.argv) > 2 else ".").removesuffix(".nitrodep") + "/.nitrodep"
             await getdep(path)
+        case "forcegetdep":
+            path: str = (sys.argv[2] if len(sys.argv) > 2 else ".").removesuffix(".nitrodep") + "/.nitrodep"
+            await getdep(path, force=True)
         case "build":
             if len(sys.argv) == 2:
-                _print_status("help", "Usage: n2 build <format(zip|targz|n2x|na)> [source path] [output path]", "warning")
+                _print_status("help", "Usage: n2 build <format(zip|targz|n2x|py)> [source path] [output path]", "warning")
                 sys.exit(1)
             await build(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ".", sys.argv[4] if len(sys.argv) > 4 else "build.%")
         case "readme":
