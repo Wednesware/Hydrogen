@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.41"
+VERSION: str = "26.42"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -67,7 +67,6 @@ NITROSTAGED_FILE: str = ".nitrostaged"
 
 running_installs: dict[tuple[str, str, str], asyncio.Task] = {}
 
-
 @dataclass(slots=True)
 class InstallResult:
     status: str
@@ -86,7 +85,7 @@ def _print_status(label: str, message: str, tone: str = "info") -> None:
         "success": CLI_SUCCESS,
         "warning": CLI_WARNING,
         "error": CLI_ERROR,
-        "muted": CLI_DIM,
+        "muted": CLI_DIM
     }
     color: str = palette.get(tone, "")
     print(f"{_cli(f'[{label}]', color, bold=True)} {message}")
@@ -1050,6 +1049,7 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
             "zip": "zip",
             "targz": "tar.gz",
             "n2x": "n2x",
+            "modm": "modm",
             "py": "py"
         }[format])
     except KeyError:
@@ -1077,7 +1077,7 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
                         if should_skip(file_path):
                             continue
                         arcname = os.path.relpath(file_path, source_abs)
-                        print(f"  {_cli('pack', CLI_DIM)} {arcname}")
+                        _print_status("pack", f"Packing {arcname}", "info")
                         zipf.write(file_path, arcname)
             _print_status("done", f"Build complete in {output_path}", "success")
         case "targz":
@@ -1089,7 +1089,7 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
                         if should_skip(file_path):
                             continue
                         arcname = os.path.relpath(file_path, source_abs)
-                        print(f"  {_cli('pack', CLI_DIM)} {arcname}")
+                        _print_status("pack", f"Packing {arcname}", "info")
                         tar.add(file_path, arcname=arcname)
             _print_status("done", f"Build complete in {output_path}", "success")
         case "n2x":
@@ -1098,13 +1098,26 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
             with tarfile.open(output_abs, "w:gz") as tar:
                 for file in required_files:
                     file_path = os.path.join(source_abs, file)
-                    print(f"  {_cli('pack', CLI_DIM)} {file}")
+                    _print_status("pack", f"Packing {file}", "info")
                     if not os.path.isfile(file_path):
                         _print_status("fail", f"Required file for build not found: '{file}'", "error")
                         return
                     tar.add(file_path, arcname=file)
             _print_status("done", f"Build complete in {output_path}", "success")
+        case "modm":
+            _print_status("build", f"Building project into {output_path}...", "info")
+            with tarfile.open(output_abs, "w:gz") as tar:
+                for root, dirs, files in os.walk(source_abs):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        if should_skip(file_path):
+                            continue
+                        arcname = os.path.relpath(file_path, source_abs)
+                        _print_status("pack", f"Packing {arcname}", "info")
+                        tar.add(file_path, arcname=arcname)
+            _print_status("done", f"Build complete in {output_path}", "success")
         case "py":
+            _print_status("build", f"Building project into {output_path}...", "info")
             _print_status("deps", "Installing build dependencies...", "info")
             await asyncio.gather(
                 install_async("magnesium", "26.11", False),
@@ -1224,7 +1237,7 @@ async def main() -> None:
             await _handle_stage_command(sys.argv[2:])
         case "build":
             if len(sys.argv) == 2:
-                _print_status("help", "Usage: n2 build <format(zip|targz|n2x|py)> [source path] [output path]", "warning")
+                _print_status("help", "Usage: n2 build <format(zip|targz|n2x|modm|py)> [source path] [output path]", "warning")
                 sys.exit(1)
             await build(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ".", sys.argv[4] if len(sys.argv) > 4 else "build.%")
         case "readme":
