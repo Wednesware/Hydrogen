@@ -1,9 +1,9 @@
-import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile, asyncio
+import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile, asyncio, re
 from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.42"
+VERSION: str = "26.43"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -112,6 +112,12 @@ def _print_help() -> None:
     _print_command("getdep [path]", "Install missing dependencies from a .nitrodep file, including nested ones.")
     _print_command("forcegetdep [path]", "Install all dependencies, regardless of whether they are already installed from a .nitrodep file, including nested ones, forcing reinstallation of all dependencies.")
     _print_command("updlibs <project>", "Reinstall all libraries in <project>/libraries/ww from their exact installed versions.")
+    print()
+    _print_section("Compatibility")
+    _print_command("compat ww <publication|directory>", "Rewrite Wednesware imports for compatibility. Use 'ww' for packages found in './ww/...'. Default compat mode.")
+    _print_command("compat rel-ww <publication|directory>", "Rewrite Wednesware imports for compatibility. Use 'rel-ww' for packages found in '<project>/ww/...' with relative imports.")
+    _print_command("compat rel-libs-ww <publication|directory>", "Rewrite Wednesware imports for compatibility. Use 'rel-libs-ww' for Helium projects or packages found in '<project>/libraries/ww/...' with relative imports.")
+    _print_command("compat custom <publication|directory> <custom-phrase>", "Rewrite Wednesware imports for compatibility. Use 'custom' to specify a custom phrase for the import prefix.")
     print()
     _print_section("Stage")
     _print_command("stage get <publication> [release]", "Stage a dependency install into ./ww.")
@@ -327,6 +333,74 @@ def _stage_tag_for_command(command: str) -> str | None:
         "rmlib": "RMLIB",
         "cmd": "RUNCMD",
     }.get(command.lower())
+
+
+COMPAT_TAG: str = "#COMPAT"
+COMPAT_BUILTIN_PREFIXES: dict[str, str] = {
+    "ww": "ww",
+    "rel-ww": ".ww",
+    "rel-libs-ww": ".libraries.ww",
+}
+# matches a `from ww...` import, capturing indent, the sub-path after `ww`, and the import clause
+_COMPAT_LINE_RE = re.compile(r'^(\s*)from\s+(?:\.?(?:libraries\.)?)ww(\.[^\s]*|)(\s+import\s+.*)$')
+
+def _compat_new_lead(mode: str, custom_phrase: str) -> str:
+    if mode == "custom":
+        return custom_phrase
+    return COMPAT_BUILTIN_PREFIXES[mode]
+
+def _compat_transform_line(line: str, mode: str, custom_phrase: str) -> str | None:
+    ending: str = "\n" if line.endswith("\n") else ""
+    body: str = line[:-1] if ending else line
+    stripped: str = body.strip()
+    if not (stripped.startswith("from ww") or stripped.endswith(COMPAT_TAG)):
+        return None
+
+    working: str = body
+    if working.rstrip().endswith(COMPAT_TAG):
+        tag_index: int = working.rstrip().rfind(COMPAT_TAG)
+        working = working[:tag_index].rstrip()
+
+    match: re.Match | None = _COMPAT_LINE_RE.match(working)
+    if match is None:
+        return None
+
+    leading_ws, rest, import_clause = match.group(1), match.group(2), match.group(3)
+    new_body: str = f"from {leading_ws}{_compat_new_lead(mode, custom_phrase)}{rest}{import_clause}  {COMPAT_TAG}"
+    if new_body == body:
+        return None
+    return new_body + ending
+
+
+def _iter_python_files(root: str):
+    if os.path.isfile(root):
+        if root.endswith(".py"):
+            yield root
+        return
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for filename in filenames:
+            if filename.endswith(".py"):
+                yield os.path.join(dirpath, filename)
+
+
+def _apply_compat(directory: str, mode: str, custom_phrase: str) -> tuple[int, int]:
+    files_changed: int = 0
+    lines_changed: int = 0
+    for path in _iter_python_files(directory):
+        with open(path) as file:
+            lines: list[str] = file.readlines()
+        changed: bool = False
+        for i, line in enumerate(lines):
+            new_line: str | None = _compat_transform_line(line, mode, custom_phrase)
+            if new_line is not None:
+                lines[i] = new_line
+                changed = True
+                lines_changed += 1
+        if changed:
+            with open(path, "w") as file:
+                file.writelines(lines)
+            files_changed += 1
+    return files_changed, lines_changed
 
 
 def _remove_publication_versions(install_root: str, pub: str, rel: str | None = None) -> int:
@@ -1233,6 +1307,48 @@ async def main() -> None:
                 _print_status("help", "Usage: n2 updlibs <project>", "warning")
                 sys.exit(1)
             await _reinstall_project_libraries(sys.argv[2])
+        case "compat":
+            if len(sys.argv) < 4:
+                _print_status("help", "Usage: n2 compat <publication|directory> <mode(ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
+                sys.exit(1)
+            compat_target: str = sys.argv[3]
+            compat_mode: str = sys.argv[2]
+            if compat_mode not in COMPAT_BUILTIN_PREFIXES and compat_mode != "custom":
+                _print_status("help", "Usage: n2 compat <publication|directory> <mode(ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
+                sys.exit(1)
+            compat_custom_phrase: str = ""
+            if compat_mode == "custom":
+                if len(sys.argv) < 5:
+                    _print_status("help", "Usage: n2 compat <publication|directory> custom <custom-phrase>", "warning")
+                    sys.exit(1)
+                compat_custom_phrase = sys.argv[4]
+
+            compat_dirs: list[str]
+            if "/" in compat_target:
+                compat_dirs = [compat_target]
+            else:
+                compat_pub: str = parsepub(compat_target).lower()
+                compat_symbol: str = REVERSE_PUBLICATION_CACHE.get(compat_pub, compat_pub)
+                compat_prefixes: set[str] = {compat_pub, compat_symbol}
+                compat_dirs = []
+                if os.path.isdir("ww"):
+                    compat_dirs = [
+                        os.path.join("ww", name) for name in os.listdir("ww")
+                        if os.path.isdir(os.path.join("ww", name)) and any(name.lower().startswith(prefix) for prefix in compat_prefixes)
+                    ]
+
+            compat_dirs = [directory for directory in compat_dirs if os.path.exists(directory)]
+            if not compat_dirs:
+                _print_status("miss", f"Could not find any installed directories for '{compat_target}'.", "warning")
+                sys.exit(1)
+
+            compat_total_files: int = 0
+            compat_total_lines: int = 0
+            for compat_dir in compat_dirs:
+                files_changed, lines_changed = _apply_compat(compat_dir, compat_mode, compat_custom_phrase)
+                compat_total_files += files_changed
+                compat_total_lines += lines_changed
+            _print_status("done", f"Updated {compat_total_lines} line(s) across {compat_total_files} file(s).", "success")
         case "stage":
             await _handle_stage_command(sys.argv[2:])
         case "build":
