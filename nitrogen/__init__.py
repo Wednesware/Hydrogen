@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.43"
+VERSION: str = "26.45"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -114,10 +114,16 @@ def _print_help() -> None:
     _print_command("updlibs <project>", "Reinstall all libraries in <project>/libraries/ww from their exact installed versions.")
     print()
     _print_section("Compatibility")
-    _print_command("compat ww <publication|directory>", "Rewrite Wednesware imports for compatibility. Use 'ww' for packages found in './ww/...'. Default compat mode.")
-    _print_command("compat rel-ww <publication|directory>", "Rewrite Wednesware imports for compatibility. Use 'rel-ww' for packages found in '<project>/ww/...' with relative imports.")
-    _print_command("compat rel-libs-ww <publication|directory>", "Rewrite Wednesware imports for compatibility. Use 'rel-libs-ww' for Helium projects or packages found in '<project>/libraries/ww/...' with relative imports.")
-    _print_command("compat custom <publication|directory> <custom-phrase>", "Rewrite Wednesware imports for compatibility. Use 'custom' to specify a custom phrase for the import prefix.")
+    _print_command("compat <mode> <publication|directory> [custom-phrase]", "Rewrite Wednesware imports in a directory to match the specified compatibility mode.")
+    _print_command("compat abs <publication|directory>", "Use 'abs' for packages found in '.'. ")
+    _print_command("compat rel <publication|directory>", "Use 'rel' for packages found in '<project>'.")
+    _print_command("compat rel-up1 <publication|directory>", "Use 'rel-up1' for packages found in '<project>/../'.")
+    _print_command("compat rel-up2 <publication|directory>", "Use 'rel-up2' for packages found in '<project>/../../'.")
+    _print_command("compat rel-up3 <publication|directory>", "Use 'rel-up3' for packages found in '<project>/../../../'.")
+    _print_command("compat abs-ww <publication|directory>", "Use 'ww' for packages found in './ww'. Default compat mode.")
+    _print_command("compat rel-ww <publication|directory>", "Use 'rel-ww' for packages found in '<project>/ww' with relative imports.")
+    _print_command("compat rel-libs-ww <publication|directory>", "Use 'rel-libs-ww' for Helium projects or packages found in '<project>/libraries/ww' with relative imports.")
+    _print_command("compat custom <publication|directory> <custom-phrase>", "Use 'custom' to specify a custom phrase for the import prefix.")
     print()
     _print_section("Stage")
     _print_command("stage get <publication> [release]", "Stage a dependency install into ./ww.")
@@ -125,9 +131,11 @@ def _print_help() -> None:
     _print_command("stage adddep <publication> [release]", "Stage adding one dependency line to ./.nitrodep.")
     _print_command("stage rmdep <publication> [release]", "Stage removing one dependency line from ./.nitrodep.")
     _print_command("stage getdep [target]", "Stage running getdep at ./<target>.")
+    _print_command("stage forcegetdep [target]", "Stage running forcegetdep at ./<target>.")
     _print_command("stage updlibs [target]", "Stage running updlibs at ./<target>.")
     _print_command("stage rm <publication> [release]", "Stage dependency removal from ./ww.")
     _print_command("stage rmlib <project> <publication> [release]", "Stage library removal from ./<project>/libraries/ww.")
+    _print_command("stage compat <mode> <publication|directory> [custom-phrase]", "Stage compatibility rewrite for Wednesware imports in a directory.")
     _print_command("stage cmd <command>", "Stage a shell command to run during stage execute/commit.")
     _print_command("stage cancel [subcommand|last] [args]", "Cancel one staged line, the last line, or the full stage.")
     _print_command("stage execute", "Execute staged actions in exact order.")
@@ -323,13 +331,15 @@ def _remove_nitrodep_dependency(path: str, pub: str, rel: str) -> bool:
 
 def _stage_tag_for_command(command: str) -> str | None:
     return {
-        "get": "ADDDEP",
-        "getlib": "ADDLIB",
-        "adddep": "ADDNDEP",
-        "rmdep": "RMNDEP",
+        "get": "GET",
+        "getlib": "GETLIB",
+        "adddep": "ADDDEP",
+        "rmdep": "RMDEP",
         "getdep": "GETDEP",
+        "forcegetdep": "FORCEGETDEP",
         "updlibs": "UPDLIBS",
-        "rm": "RMDEP",
+        "compat": "COMPAT",
+        "rm": "RM",
         "rmlib": "RMLIB",
         "cmd": "RUNCMD",
     }.get(command.lower())
@@ -337,17 +347,28 @@ def _stage_tag_for_command(command: str) -> str | None:
 
 COMPAT_TAG: str = "#COMPAT"
 COMPAT_BUILTIN_PREFIXES: dict[str, str] = {
-    "ww": "ww",
+    "abs-ww": "ww",
+    "abs": "",
+    "rel": ".",
+    "rel-up1": "..",
+    "rel-up2": "...",
+    "rel-up3": "....",
     "rel-ww": ".ww",
     "rel-libs-ww": ".libraries.ww",
 }
 # matches a `from ww...` import, capturing indent, the sub-path after `ww`, and the import clause
 _COMPAT_LINE_RE = re.compile(r'^(\s*)from\s+(?:\.?(?:libraries\.)?)ww(\.[^\s]*|)(\s+import\s+.*)$')
 
-def _compat_new_lead(mode: str, custom_phrase: str) -> str:
+def _compat_new_path(mode: str, custom_phrase: str, rest: str) -> str | None:
     if mode == "custom":
-        return custom_phrase
-    return COMPAT_BUILTIN_PREFIXES[mode]
+        return custom_phrase + rest
+    if mode == "abs":
+        # absolute import with no leading dot, so drop the leading dot ww left on the sub-path
+        sub: str = rest[1:] if rest.startswith(".") else rest
+        return sub or None
+    if mode == "rel":
+        return rest if rest else "."
+    return COMPAT_BUILTIN_PREFIXES[mode] + rest
 
 def _compat_transform_line(line: str, mode: str, custom_phrase: str) -> str | None:
     ending: str = "\n" if line.endswith("\n") else ""
@@ -366,7 +387,10 @@ def _compat_transform_line(line: str, mode: str, custom_phrase: str) -> str | No
         return None
 
     leading_ws, rest, import_clause = match.group(1), match.group(2), match.group(3)
-    new_body: str = f"from {leading_ws}{_compat_new_lead(mode, custom_phrase)}{rest}{import_clause}  {COMPAT_TAG}"
+    new_path: str | None = _compat_new_path(mode, custom_phrase, rest)
+    if new_path is None:
+        return None
+    new_body: str = f"from {leading_ws}{new_path}{import_clause}  {COMPAT_TAG}"
     if new_body == body:
         return None
     return new_body + ending
@@ -487,9 +511,11 @@ def _parse_stage_line(line: str) -> StageAction | None:
         "ADDNDEP": 2,
         "RMNDEP": 2,
         "GETDEP": 1,
+        "FORCEGETDEP": 1,
         "UPDLIBS": 1,
         "RMDEP": 2,
         "RMLIB": 3,
+        "COMPAT": 3,
     }
     if action not in arity:
         return None
@@ -555,20 +581,27 @@ async def _execute_stage_ordered(actions: list[StageAction]) -> None:
         elif action.action == "GETDEP":
             target = action.args[0]
             await getdep_everywhere(target)
+        elif action.action == "FORCEGETDEP":
+            target = action.args[0]
+            await getdep_everywhere(target, force=True)
         elif action.action == "UPDLIBS":
             project = action.args[0]
             await _reinstall_project_libraries(project)
         elif action.action == "RMDEP":
             pub, rel = action.args
             deleted: int = _remove_publication_versions("ww", pub, rel)
-            _print_status("done", f"Removed {deleted} release(s) of '{parsepub(pub).lower()}' ({rel}) from ./ww.", "success")
+            _print_status("done", f"Removed {deleted} release{'s' if deleted != 1 else ''} of '{parsepub(pub).lower()}' ({rel}) from ./ww.", "success")
         elif action.action == "RMLIB":
             project, pub, rel = action.args
             install_root = os.path.join(project, "libraries", "ww")
             deleted = _remove_publication_versions(install_root, pub, rel)
-            _print_status("done", f"Removed {deleted} release(s) of '{parsepub(pub).lower()}' ({rel}) from ./{project}/libraries/ww.", "success")
+            _print_status("done", f"Removed {deleted} release{'s' if deleted != 1 else ''} of '{parsepub(pub).lower()}' ({rel}) from ./{project}/libraries/ww.", "success")
         elif action.action == "RUNCMD":
             _run_staged_command(action.args[0])
+        elif action.action == "COMPAT":
+            mode, target, custom_phrase = action.args
+            files_changed, lines_changed = _apply_compat(target, mode, custom_phrase)
+            _print_status("done", f"Compatibility rewrite completed: {files_changed} file{'s' if files_changed != 1 else ''} changed with {lines_changed} line{'s' if lines_changed != 1 else ''} modified.", "success")
 
 
 async def _commit_stage_batched(actions: list[StageAction]) -> None:
@@ -626,6 +659,9 @@ async def _commit_stage_batched(actions: list[StageAction]) -> None:
         elif action.action == "GETDEP":
             target = action.args[0]
             await getdep_everywhere(target)
+        elif action.action == "FORCEGETDEP":
+            target = action.args[0]
+            await getdep_everywhere(target, force=True)
         elif action.action == "UPDLIBS":
             project = action.args[0]
             await _reinstall_project_libraries(project)
@@ -645,16 +681,16 @@ async def _commit_stage_batched(actions: list[StageAction]) -> None:
             _print_install_result(result)
             install_failures += int(bool(result.exit_code))
         if install_failures:
-            _print_status("fail", f"Commit install finished with {install_failures} failure(s).", "error")
+            _print_status("fail", f"Commit install finished with {install_failures} failure{'s' if install_failures != 1 else ''}.", "error")
             raise SystemExit(1)
 
     for pub, rel in rm_dep:
         deleted: int = _remove_publication_versions("ww", pub, rel)
-        _print_status("done", f"Removed {deleted} release(s) of '{parsepub(pub).lower()}' ({rel}) from ./ww.", "success")
+        _print_status("done", f"Removed {deleted} release{'s' if deleted != 1 else ''} of '{parsepub(pub).lower()}' ({rel}) from ./ww.", "success")
     for project, pub, rel in rm_lib:
         install_root: str = os.path.join(project, "libraries", "ww")
         deleted = _remove_publication_versions(install_root, pub, rel)
-        _print_status("done", f"Removed {deleted} release(s) of '{parsepub(pub).lower()}' ({rel}) from ./{project}/libraries/ww.", "success")
+        _print_status("done", f"Removed {deleted} release{'s' if deleted != 1 else ''} of '{parsepub(pub).lower()}' ({rel}) from ./{project}/libraries/ww.", "success")
 
 
 async def _run_staged(mode: str) -> None:
@@ -682,7 +718,7 @@ async def _run_staged(mode: str) -> None:
 
 async def _handle_stage_command(args: list[str]) -> None:
     if not args:
-        _print_status("help", "Usage: n2 stage <get|getlib|adddep|rmdep|getdep|updlibs|rm|rmlib|cmd|cancel|execute|commit> [...]", "warning")
+        _print_status("help", "Usage: n2 stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|cancel|execute|commit> [...]", "warning")
         sys.exit(1)
 
     subcommand: str = args[0].lower()
@@ -737,6 +773,15 @@ async def _handle_stage_command(args: list[str]) -> None:
         _print_status("stage", f"Staged getdep {target}", "success")
         return
 
+    if subcommand == "forcegetdep":
+        if len(args) > 2:
+            _print_status("help", "Usage: n2 stage forcegetdep [target]", "warning")
+            sys.exit(1)
+        target = args[1] if len(args) > 1 else "."
+        _append_stage_line(f"FORCEGETDEP|{target}")
+        _print_status("stage", f"Staged forcegetdep {target}", "success")
+        return
+
     if subcommand == "updlibs":
         if len(args) > 2:
             _print_status("help", "Usage: n2 stage updlibs [target]", "warning")
@@ -765,6 +810,25 @@ async def _handle_stage_command(args: list[str]) -> None:
         rel = args[3] if len(args) > 3 else "latest"
         _append_stage_line(f"RMLIB|{project}|{pub}|{rel}")
         _print_status("stage", f"Staged rmlib {project} {pub} {rel}", "success")
+        return
+    
+    if subcommand == "compat":
+        if len(args) < 3:
+            _print_status("help", "Usage: n2 stage compat <mode> <publication|directory> [custom-phrase]", "warning")
+            sys.exit(1)
+        mode: str = args[1]
+        target: str = args[2]
+        if mode not in COMPAT_BUILTIN_PREFIXES and mode != "custom":
+            _print_status("help", "Usage: n2 stage compat <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> <publication|directory> [custom-phrase]", "warning")
+            sys.exit(1)
+        custom_phrase: str = ""
+        if mode == "custom":
+            if len(args) < 4:
+                _print_status("help", "Usage: n2 stage compat custom <publication|directory> <custom-phrase>", "warning")
+                sys.exit(1)
+            custom_phrase = args[3]
+        _append_stage_line(f"COMPAT|{mode}|{target}|{custom_phrase}")
+        _print_status("stage", f"Staged compat {mode} {target}", "success")
         return
 
     if subcommand == "cmd":
@@ -796,18 +860,18 @@ async def _handle_stage_command(args: list[str]) -> None:
         command_name: str = args[1].lower()
         tag: str | None = _stage_tag_for_command(command_name)
         if tag is None:
-            _print_status("help", "Usage: n2 stage cancel [get|getlib|adddep|rmdep|getdep|updlibs|rm|rmlib|cmd|last] [args]", "warning")
+            _print_status("help", "Usage: n2 stage cancel [get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|last] [args]", "warning")
             sys.exit(1)
 
         target_line: str | None = None
-        if tag == "ADDDEP":
+        if tag == "GET":
             if len(args) < 3:
                 _print_status("help", "Usage: n2 stage cancel get <publication> [release]", "warning")
                 sys.exit(1)
             publication: str = parsepub(args[2]).lower()
             release: str = args[3] if len(args) > 3 else "latest"
             target_line = f"ADDDEP|{publication}|{release}"
-        elif tag == "ADDLIB":
+        elif tag == "GETLIB":
             if len(args) < 4:
                 _print_status("help", "Usage: n2 stage cancel getlib <project> <publication> [release]", "warning")
                 sys.exit(1)
@@ -815,14 +879,14 @@ async def _handle_stage_command(args: list[str]) -> None:
             publication = parsepub(args[3]).lower()
             release = args[4] if len(args) > 4 else "latest"
             target_line = f"ADDLIB|{project}|{publication}|{release}"
-        elif tag == "ADDNDEP":
+        elif tag == "ADDDEP":
             if len(args) < 3:
                 _print_status("help", "Usage: n2 stage cancel adddep <publication> [release]", "warning")
                 sys.exit(1)
             publication = parsepub(args[2]).lower()
             release = args[3] if len(args) > 3 else "latest"
             target_line = f"ADDNDEP|{publication}|{release}"
-        elif tag == "RMNDEP":
+        elif tag == "RMDEP":
             if len(args) < 3:
                 _print_status("help", "Usage: n2 stage cancel rmdep <publication> [release]", "warning")
                 sys.exit(1)
@@ -835,13 +899,19 @@ async def _handle_stage_command(args: list[str]) -> None:
                 sys.exit(1)
             target: str = args[2] if len(args) > 2 else "."
             target_line = f"GETDEP|{target}"
+        elif tag == "FORCEGETDEP":
+            if len(args) > 3:
+                _print_status("help", "Usage: n2 stage cancel forcegetdep [target]", "warning")
+                sys.exit(1)
+            target = args[2] if len(args) > 2 else "."
+            target_line = f"FORCEGETDEP|{target}"
         elif tag == "UPDLIBS":
             if len(args) > 3:
                 _print_status("help", "Usage: n2 stage cancel updlibs [target]", "warning")
                 sys.exit(1)
             target = args[2] if len(args) > 2 else "."
             target_line = f"UPDLIBS|{target}"
-        elif tag == "RMDEP":
+        elif tag == "RM":
             if len(args) < 3:
                 _print_status("help", "Usage: n2 stage cancel rm <publication> [release]", "warning")
                 sys.exit(1)
@@ -856,6 +926,14 @@ async def _handle_stage_command(args: list[str]) -> None:
             publication = parsepub(args[3]).lower()
             release = args[4] if len(args) > 4 else "latest"
             target_line = f"RMLIB|{project}|{publication}|{release}"
+        elif tag == "COMPAT":
+            if len(args) < 5:
+                _print_status("help", "Usage: n2 stage cancel compat <mode> <target> <custom_phrase>", "warning")
+                sys.exit(1)
+            mode = args[2]
+            target = args[3]
+            custom_phrase = args[4]
+            target_line = f"COMPAT|{mode}|{target}|{custom_phrase}"
         elif tag == "RUNCMD":
             if len(args) < 3:
                 _print_status("help", "Usage: n2 stage cancel cmd <command>", "warning")
@@ -882,7 +960,7 @@ async def _handle_stage_command(args: list[str]) -> None:
         return
 
     _print_status("help", f"Unknown stage subcommand: {subcommand}", "warning")
-    _print_status("help", "Usage: n2 stage <get|getlib|adddep|rmdep|getdep|updlibs|rm|rmlib|cmd|cancel|execute|commit> [...]", "warning")
+    _print_status("help", "Usage: n2 stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|cancel|execute|commit> [...]", "warning")
     sys.exit(1)
 
 
@@ -920,7 +998,7 @@ async def _reinstall_project_libraries(project: str) -> None:
         _print_install_result(result)
         failures += int(bool(result.exit_code))
     if failures:
-        _print_status("fail", f"Library reinstall finished with {failures} failure(s).", "error")
+        _print_status("fail", f"Library reinstall finished with {failures} failure{'s' if failures != 1 else ''}.", "error")
         raise SystemExit(1)
 
     _print_status("done", f"Reinstalled {len(results)} librar{'y' if len(results) == 1 else 'ies'} from {install_root}.", "success")
@@ -935,14 +1013,13 @@ def _install_publication_to_root(pub: str, rel: str, install_root: str, reinstal
     release_token: str = _release_token(rel)
     archive_path: str = f"{pub_lower}-{release_token}.zip"
     extract_dir: str = f"{pub_lower}-repo-{release_token}"
-
+    url: str = f"https://github.com/Wednesware/{pub.capitalize()}/archive/refs/heads/main.zip" if rel == "beta" else f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub_lower}.zip"
     try:
         if os.path.exists(dirname) and not reinstall:
             return InstallResult("info", [f"{pub_lower} {rel}: Publication is already installed."])
-
         try:
             urlretrieve(
-                f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub_lower}.zip",
+                url,
                 archive_path,
             )
         except urllib.error.HTTPError:
@@ -1003,22 +1080,44 @@ async def _getdep_recursive(path: str, color: bool = True, log: bool = True, vis
         return
     with open(dep_path) as file:
         content: str = file.read()
-    if not content.strip():
+    deps: list[tuple[str, str]] = [(line.split()[0].strip(), line.split(maxsplit=1)[1].strip() if len(line.split(maxsplit=1)) > 1 else "latest") for line in content.split("\n") if line.strip() and not line.strip().startswith("//")]
+    if not deps:
         if log:
             _print_status("done", "No dependencies needed.", "success")
         return
-
-    deps: list[tuple[str, str]] = [(line.split()[0].strip(), line.split()[1].strip() if len(line.split()) > 1 else "latest") for line in content.split("\n") if line.strip()]
     if log:
         _print_status("deps", f"Loaded {len(deps)} dependenc{'y' if len(deps) == 1 else 'ies'} from {dep_path}", "info")
     pending_deps: list[tuple[str, str]] = []
+    scripts_allowed: bool = "allow" if "--allow" in sys.argv else ("skip" if "--skip" in sys.argv else "deny")
+    print_tip: bool = False
     for pub, rel in deps:
         dep_key: tuple[str, str] = (parsepub(pub).lower(), rel)
         if dep_key in installed:
             continue
+        if pub.lower().startswith("script:"):
+            if scripts_allowed == "allow":
+                _print_status("script", f"Executing script dependency: {pub} {rel}", "info")
+                script_path: str = pub[len("script:"):]
+                if not os.path.isfile(script_path):
+                    _print_status("fail", f"Script file '{script_path}' not found.", "error")
+                    raise SystemExit(1)
+                try:
+                    with open(script_path) as script_file:
+                        script_content: str = script_file.read()
+                    exec(script_content, {"__name__": "__main__"})
+                except Exception:
+                    _print_status("fail", f"Error executing script '{script_path}':\n{traceback.format_exc()}", "error")
+                    raise SystemExit(1)
+            elif scripts_allowed == "skip":
+                _print_status("skip", f"Skipping script dependency: {pub} {rel}", "muted")
+            else:
+                _print_status("deny", f"Script dependency '{pub}' is not allowed. Use '--allow' to allow or '--skip' to skip.", "error")
+                raise SystemExit(1)
+            continue
         installed.add(dep_key)
         pending_deps.append((pub, rel))
-
+    if print_tip:
+        _print_status("deny", "To allow scripts, re-run with '--allow'. To skip scripts, re-run with '--skip'.", "info")
     tasks: list[asyncio.Task] = [_queue_install(pub, rel, (rel == "latest") or force) for pub, rel in pending_deps]
     results: list[InstallResult] = await asyncio.gather(*tasks)
     for result in results:
@@ -1027,13 +1126,12 @@ async def _getdep_recursive(path: str, color: bool = True, log: bool = True, vis
     failures: int = sum(1 for result in results if result.exit_code)
     if failures:
         if log:
-            _print_status("fail", f"Dependency install finished with {failures} failure(s).", "error")
+            _print_status("fail", f"Dependency install finished with {failures} failure{'s' if failures != 1 else ''}.", "error")
         raise SystemExit(1)
 
     for pub, rel in deps:
         installed_dep_path: str = _dependency_file_path(_publication_dirname(parsepub(pub), rel))
         await _getdep_recursive(installed_dep_path, color=color, log=False, visited=visited, installed=installed)
-
     if log:
         _print_status("done", "All dependencies are ready.", "success")
                 
@@ -1047,7 +1145,7 @@ async def getdep_everywhere(path: str, color: bool = True, force: bool = False) 
         _print_status("miss", f"No .nitrodep files found under '{path}'.", "warning")
         return
 
-    _print_status("deps", f"Found {len(dep_files)} .nitrodep file(s) under '{path}'.", "info")
+    _print_status("deps", f"Found {len(dep_files)} .nitrodep file{'s' if len(dep_files) != 1 else ''} under '{path}'.", "info")
     visited: set[str] = set()
     installed: set[tuple[str, str]] = set()
     for dep_file in dep_files:
@@ -1309,12 +1407,12 @@ async def main() -> None:
             await _reinstall_project_libraries(sys.argv[2])
         case "compat":
             if len(sys.argv) < 4:
-                _print_status("help", "Usage: n2 compat <publication|directory> <mode(ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
+                _print_status("help", "Usage: n2 compat <publication|directory> <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
                 sys.exit(1)
             compat_target: str = sys.argv[3]
             compat_mode: str = sys.argv[2]
             if compat_mode not in COMPAT_BUILTIN_PREFIXES and compat_mode != "custom":
-                _print_status("help", "Usage: n2 compat <publication|directory> <mode(ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
+                _print_status("help", "Usage: n2 compat <publication|directory> <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
                 sys.exit(1)
             compat_custom_phrase: str = ""
             if compat_mode == "custom":
@@ -1348,7 +1446,7 @@ async def main() -> None:
                 files_changed, lines_changed = _apply_compat(compat_dir, compat_mode, compat_custom_phrase)
                 compat_total_files += files_changed
                 compat_total_lines += lines_changed
-            _print_status("done", f"Updated {compat_total_lines} line(s) across {compat_total_files} file(s).", "success")
+            _print_status("done", f"Updated {compat_total_lines} line{'s' if compat_total_lines != 1 else ''} across {compat_total_files} file{'s' if compat_total_files != 1 else ''}.", "success")
         case "stage":
             await _handle_stage_command(sys.argv[2:])
         case "build":
@@ -1389,9 +1487,10 @@ async def main() -> None:
                 _print_status("help", "Usage: n2 untrust-ext <extension>", "warning")
                 sys.exit(1)
             ext_filename: str = sys.argv[2] + ".n2x"
+            with open(TRUSTED_EXTENSIONS_FILE) as file:
+                content: str = file.read()
             with open(TRUSTED_EXTENSIONS_FILE, "w") as file:
-                content: str = file.read()    
-            file.write("\n".join([line for line in content.split("\n") if line.strip() != ext_filename]))
+                file.write("\n".join([line for line in content.split("\n") if line.strip() != ext_filename]))
         case "list-ext":
             _print_installed_extensions()
         case "load-len":
@@ -1403,8 +1502,9 @@ async def main() -> None:
                 _print_status("help", "Usage: n2 install-ext <extension>", "warning")
                 sys.exit(1)
             load_len()
-            if os.path.exists(os.path.join(LEN_PATH, sys.argv[2] + ".n2x" if not sys.argv[2].endswith(".n2x") else sys.argv[2])):
-                shutil.copy(os.path.join(LEN_PATH, sys.argv[2] + ".n2x"), EXTENSIONS_DIR)
+            install_ext_filename: str = sys.argv[2] if sys.argv[2].endswith(".n2x") else sys.argv[2] + ".n2x"
+            if os.path.exists(os.path.join(LEN_PATH, install_ext_filename)):
+                shutil.copy(os.path.join(LEN_PATH, install_ext_filename), EXTENSIONS_DIR)
                 _print_status("done", f"Extension '{sys.argv[2]}' installed successfully.", "success")
             else:
                 _print_status("miss", f"Extension '{sys.argv[2]}' not found in the LEN repository.", "warning")
@@ -1458,3 +1558,6 @@ async def main() -> None:
             
 def entrypoint() -> None:
     asyncio.run(main())
+    
+if __name__ == "__main__":
+    entrypoint()

@@ -7,7 +7,7 @@ Easy, ultra-lightweight installer for Wednesware publications.
 ### From PyPI via pipx (recommended, global install, run with `n2`):
 * `pipx install wwn`
 
-### From AUR via an AUR helper (best for arch linux, endeavouros, manjaro or garuda linux users, global install, run with `n2`):
+### CURRENTLY NOT WORKING: From AUR via an AUR helper (best for arch linux, endeavouros, manjaro or garuda linux users, global install, run with `n2`):
 * `yay -S n2`
 * You may alternatively also use `paru`, `pikaur`, or any other AUR helper to install Nitrogen from the AUR instead of `yay`.
 
@@ -48,9 +48,11 @@ Easy, ultra-lightweight installer for Wednesware publications.
 * `n2 stage adddep <publication> [release]` - Stage adding a dependency to `./.nitrodep`.
 * `n2 stage rmdep <publication> [release]` - Stage removing a dependency from `./.nitrodep`.
 * `n2 stage getdep [target]` - Stage running `getdep` at target path (`.` by default).
+* `n2 stage forcegetdep [target]` - Stage running `forcegetdep` at target path (`.` by default).
 * `n2 stage updlibs [target]` - Stage running `updlibs` at target path (`.` by default).
 * `n2 stage rm <publication> [release]` - Stage removal from `./ww`.
 * `n2 stage rmlib <project> <publication> [release]` - Stage removal from `./<project>/libraries/ww`.
+* `n2 stage compat <publication> [release]` - Stage compatibility rewrite for Wednesware imports in a directory.
 * `n2 stage cmd <*cmd>` - Stage a shell command.
 * `n2 stage cancel [subcommand|last] [*arguments]` - Cancel staged entries, last entry, or all entries.
 * `n2 stage execute` - Run staged actions in the order they were staged.
