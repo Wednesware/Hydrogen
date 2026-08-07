@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.45"
+VERSION: str = "26.46"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -358,6 +358,9 @@ COMPAT_BUILTIN_PREFIXES: dict[str, str] = {
 }
 # matches a `from ww...` import, capturing indent, the sub-path after `ww`, and the import clause
 _COMPAT_LINE_RE = re.compile(r'^(\s*)from\s+(?:\.?(?:libraries\.)?)ww(\.[^\s]*|)(\s+import\s+.*)$')
+# matches any already-tagged `from <path> import ...` line, since a prior compat run may have
+# stripped the literal "ww" from the path (e.g. "rel"/"abs" modes), so it can't be matched by _COMPAT_LINE_RE
+_COMPAT_TAGGED_LINE_RE = re.compile(r'^(\s*)from\s+(\S+)(\s+import\s+.*)$')
 
 def _compat_new_path(mode: str, custom_phrase: str, rest: str) -> str | None:
     if mode == "custom":
@@ -370,23 +373,41 @@ def _compat_new_path(mode: str, custom_phrase: str, rest: str) -> str | None:
         return rest if rest else "."
     return COMPAT_BUILTIN_PREFIXES[mode] + rest
 
+def _compat_rest_from_tagged_path(path: str, custom_phrase: str) -> str:
+    # recover the canonical (dot-prefixed) sub-path after "ww" from a path already rewritten by any builtin/custom mode
+    for prefix in (".libraries.ww", ".ww", "ww"):
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    if custom_phrase and path.startswith(custom_phrase):
+        return path[len(custom_phrase):]
+    if path in ("", "."):
+        return ""
+    return path if path.startswith(".") else "." + path
+
 def _compat_transform_line(line: str, mode: str, custom_phrase: str) -> str | None:
     ending: str = "\n" if line.endswith("\n") else ""
     body: str = line[:-1] if ending else line
     stripped: str = body.strip()
-    if not (stripped.startswith("from ww") or stripped.endswith(COMPAT_TAG)):
+    is_tagged: bool = stripped.endswith(COMPAT_TAG)
+    if not (stripped.startswith("from ww") or is_tagged):
         return None
-
     working: str = body
     if working.rstrip().endswith(COMPAT_TAG):
         tag_index: int = working.rstrip().rfind(COMPAT_TAG)
         working = working[:tag_index].rstrip()
 
-    match: re.Match | None = _COMPAT_LINE_RE.match(working)
-    if match is None:
-        return None
+    if is_tagged:
+        tagged_match: re.Match | None = _COMPAT_TAGGED_LINE_RE.match(working)
+        if tagged_match is None:
+            return None
+        leading_ws, path, import_clause = tagged_match.group(1), tagged_match.group(2), tagged_match.group(3)
+        rest: str = _compat_rest_from_tagged_path(path, custom_phrase)
+    else:
+        match: re.Match | None = _COMPAT_LINE_RE.match(working)
+        if match is None:
+            return None
+        leading_ws, rest, import_clause = match.group(1), match.group(2), match.group(3)
 
-    leading_ws, rest, import_clause = match.group(1), match.group(2), match.group(3)
     new_path: str | None = _compat_new_path(mode, custom_phrase, rest)
     if new_path is None:
         return None
@@ -394,7 +415,6 @@ def _compat_transform_line(line: str, mode: str, custom_phrase: str) -> str | No
     if new_body == body:
         return None
     return new_body + ending
-
 
 def _iter_python_files(root: str):
     if os.path.isfile(root):
@@ -405,7 +425,6 @@ def _iter_python_files(root: str):
         for filename in filenames:
             if filename.endswith(".py"):
                 yield os.path.join(dirpath, filename)
-
 
 def _apply_compat(directory: str, mode: str, custom_phrase: str) -> tuple[int, int]:
     files_changed: int = 0
