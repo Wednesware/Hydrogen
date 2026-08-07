@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.46"
+VERSION: str = "26.47"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -349,10 +349,10 @@ COMPAT_TAG: str = "#COMPAT"
 COMPAT_BUILTIN_PREFIXES: dict[str, str] = {
     "abs-ww": "ww",
     "abs": "",
-    "rel": ".",
-    "rel-up1": "..",
-    "rel-up2": "...",
-    "rel-up3": "....",
+    "rel": "",
+    "rel-up1": ".",
+    "rel-up2": "..",
+    "rel-up3": "...",
     "rel-ww": ".ww",
     "rel-libs-ww": ".libraries.ww",
 }
@@ -369,8 +369,11 @@ def _compat_new_path(mode: str, custom_phrase: str, rest: str) -> str | None:
         # absolute import with no leading dot, so drop the leading dot ww left on the sub-path
         sub: str = rest[1:] if rest.startswith(".") else rest
         return sub or None
-    if mode == "rel":
-        return rest if rest else "."
+    if mode in ("rel", "rel-up1", "rel-up2", "rel-up3"):
+        # rest already carries its own leading dot (or is empty), so the prefix here holds only
+        # the *extra* up-level dots; pad with a bare "." when rest is empty to keep dot counts consistent
+        prefix: str = COMPAT_BUILTIN_PREFIXES[mode]
+        return prefix + rest if rest else prefix + "."
     return COMPAT_BUILTIN_PREFIXES[mode] + rest
 
 def _compat_rest_from_tagged_path(path: str, custom_phrase: str) -> str:
@@ -380,6 +383,11 @@ def _compat_rest_from_tagged_path(path: str, custom_phrase: str) -> str:
             return path[len(prefix):]
     if custom_phrase and path.startswith(custom_phrase):
         return path[len(custom_phrase):]
+    stripped: str = path.lstrip(".")
+    if path and stripped != path:
+        # path was purely dots (rel/rel-upN result), so re-normalize to a single leading dot (or none)
+        # instead of keeping every up-level dot, which would compound on repeated transforms
+        return "." + stripped if stripped else ""
     if path in ("", "."):
         return ""
     return path if path.startswith(".") else "." + path
