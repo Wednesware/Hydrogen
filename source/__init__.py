@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-SOURCEGEN_VERSION: str = "26.2" # SHOULD NOT BE CHANGED
+SOURCEGEN_VERSION: str = "26.3" # SHOULD NOT BE CHANGED
 
 NAME: str = "Sourcegen" # TODO
 DESCRIPTION: str = "Enter a short one-line description here." # TODO

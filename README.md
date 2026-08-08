@@ -17,16 +17,7 @@
 
 ## How to start
 
-### Template (recommended)
-
-1. `gh repo create <your-repo-name> --template Wednesware/Sourcegen --public` (or `--private` for a private repository)
-2. `gh repo clone <your-username>/<your-repo-name>`
-3. done!
-
-### Fork
-
-1. `gh repo fork Wednesware/Sourcegen --clone`
-2. done!
+* `gh repo fork Wednesware/Sourcegen --clone`
 
 ## Important note
 
