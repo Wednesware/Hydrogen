@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os, sys, importlib, importlib.util, difflib
 
-from .ww.mg26_11.config import ObjectNotation, ObjectNotationError # type: ignore  #COMPAT
-from .ww.mg26_11.filepath import FilePath  #COMPAT
+from .mg26_11.config import ObjectNotation, ObjectNotationError # type: ignore  #COMPAT
+from .mg26_11.filepath import FilePath  #COMPAT
 
 
 class Handler:
@@ -102,7 +102,10 @@ class LibraryHandler(Handler):
     NAME: str = "libraries"
     SAME_NAME_OBJECT: bool = False
     def __getattr__(self, name: str) -> any:
-        return super().__getattr__(name) # type: ignore
+        try:
+            return super().__getattr__(name) # type: ignore
+        except FileNotFoundError:
+            return getattr(super().__getattr__("__init__"), name) # type: ignore
 
 class ModHandler(Handler):
     NAME: str = "mods"

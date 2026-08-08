@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import builtins, os, tarfile, tempfile, fnmatch, subprocess, threading, importlib.util
 
-from .ww.mg26_11.config import ObjectNotation # type: ignore  #COMPAT
-from .ww.mg26_11.filepath import FilePath  #COMPAT
+from .mg26_11.config import ObjectNotation # type: ignore  #COMPAT
+from .mg26_11.filepath import FilePath  #COMPAT
 
 
 RESERVED_FILES: set[str] = {"__mod__.py", "modmancer.pyon", "MODINFO.md", "LICENSE.md", ".nitrodep"}

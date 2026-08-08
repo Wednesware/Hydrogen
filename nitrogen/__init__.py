@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-VERSION: str = "26.47"
+VERSION: str = "26.48"
 CLI_RESET: str = "\033[0m"
 CLI_BOLD: str = "\033[1m"
 CLI_DIM: str = "\033[90m"
@@ -346,48 +346,76 @@ def _stage_tag_for_command(command: str) -> str | None:
 
 
 COMPAT_TAG: str = "#COMPAT"
-COMPAT_BUILTIN_PREFIXES: dict[str, str] = {
-    "abs-ww": "ww",
-    "abs": "",
-    "rel": "",
-    "rel-up1": ".",
-    "rel-up2": "..",
-    "rel-up3": "...",
-    "rel-ww": ".ww",
-    "rel-libs-ww": ".libraries.ww",
+# Each compat mode is pure data: a prefix plus a join strategy, so adding a new mode never
+# requires touching the transform logic below - just add an entry here.
+#   "dot"      -> collapse the boundary between a trailing "." on the prefix and the sub-path's
+#                 leading "." into a single "." (namespace-style prefixes, e.g. "ww.", ".ww.")
+#   "raw"      -> concatenate prefix and sub-path verbatim, no collapsing (every "." is
+#                 meaningful, e.g. "up N levels" relative prefixes)
+#   "strip"    -> drop the sub-path's own leading "." entirely (plain absolute imports)
+#   "identity" -> the sub-path is already in canonical form; only the empty-path fallback is used
+COMPAT_MODES: dict[str, tuple[str, str]] = {
+    "abs-ww": ("ww.", "dot"),
+    "abs": ("", "strip"),
+    "rel": (".", "identity"),
+    "rel-up1": ("..", "raw"),
+    "rel-up2": ("...", "raw"),
+    "rel-up3": ("....", "raw"),
+    "rel-ww": (".ww.", "dot"),
+    "rel-libs-ww": (".libraries.ww.", "dot"),
 }
-# matches a `from ww...` import, capturing indent, the sub-path after `ww`, and the import clause
 _COMPAT_LINE_RE = re.compile(r'^(\s*)from\s+(?:\.?(?:libraries\.)?)ww(\.[^\s]*|)(\s+import\s+.*)$')
-# matches any already-tagged `from <path> import ...` line, since a prior compat run may have
-# stripped the literal "ww" from the path (e.g. "rel"/"abs" modes), so it can't be matched by _COMPAT_LINE_RE
 _COMPAT_TAGGED_LINE_RE = re.compile(r'^(\s*)from\s+(\S+)(\s+import\s+.*)$')
+
+def _compat_join(prefix: str, rest: str, join: str) -> str | None:
+    if join == "identity":
+        return rest if rest else prefix
+    if join == "strip":
+        sub: str = rest[1:] if rest.startswith(".") else rest
+        return sub or None
+    if join == "raw":
+        return prefix + rest
+    # join == "dot": collapse a trailing "." on the prefix with the sub-path's leading "."
+    if not rest:
+        return prefix[:-1] if prefix.endswith(".") else prefix
+    if prefix.endswith(".") and rest.startswith("."):
+        return prefix[:-1] + rest
+    return prefix + rest
 
 def _compat_new_path(mode: str, custom_phrase: str, rest: str) -> str | None:
     if mode == "custom":
-        return custom_phrase + rest
-    if mode == "abs":
-        # absolute import with no leading dot, so drop the leading dot ww left on the sub-path
-        sub: str = rest[1:] if rest.startswith(".") else rest
-        return sub or None
-    if mode in ("rel", "rel-up1", "rel-up2", "rel-up3"):
-        # rest already carries its own leading dot (or is empty), so the prefix here holds only
-        # the *extra* up-level dots; pad with a bare "." when rest is empty to keep dot counts consistent
-        prefix: str = COMPAT_BUILTIN_PREFIXES[mode]
-        return prefix + rest if rest else prefix + "."
-    return COMPAT_BUILTIN_PREFIXES[mode] + rest
+        return _compat_join(custom_phrase, rest, "raw")
+    config: tuple[str, str] | None = COMPAT_MODES.get(mode)
+    if config is None:
+        return None
+    prefix, join = config
+    return _compat_join(prefix, rest, join)
 
 def _compat_rest_from_tagged_path(path: str, custom_phrase: str) -> str:
-    # recover the canonical (dot-prefixed) sub-path after "ww" from a path already rewritten by any builtin/custom mode
-    for prefix in (".libraries.ww", ".ww", "ww"):
-        if path.startswith(prefix):
+    # recover the canonical (dot-prefixed) sub-path from a path already rewritten by any mode,
+    # so switching modes on a previously-tagged line works even without knowing which mode built it
+    def _is_canonical(candidate: str) -> bool:
+        return candidate == "" or candidate.startswith(".")
+
+    raw_prefixes: list[str] = sorted(
+        (prefix for prefix, join in COMPAT_MODES.values() if join == "raw"), key=len, reverse=True
+    )
+    if custom_phrase:
+        raw_prefixes.insert(0, custom_phrase)
+    for prefix in raw_prefixes:
+        if path.startswith(prefix) and _is_canonical(path[len(prefix):]):
             return path[len(prefix):]
-    if custom_phrase and path.startswith(custom_phrase):
-        return path[len(custom_phrase):]
-    stripped: str = path.lstrip(".")
-    if path and stripped != path:
-        # path was purely dots (rel/rel-upN result), so re-normalize to a single leading dot (or none)
-        # instead of keeping every up-level dot, which would compound on repeated transforms
-        return "." + stripped if stripped else ""
+
+    dot_prefixes: list[str] = sorted(
+        (prefix for prefix, join in COMPAT_MODES.values() if join == "dot"), key=len, reverse=True
+    )
+    for prefix in dot_prefixes:
+        base: str = prefix[:-1] if prefix.endswith(".") else prefix
+        if path == base:
+            return ""
+        if path.startswith(base + "."):
+            return path[len(base):]
+
     if path in ("", "."):
         return ""
     return path if path.startswith(".") else "." + path
@@ -419,7 +447,7 @@ def _compat_transform_line(line: str, mode: str, custom_phrase: str) -> str | No
     new_path: str | None = _compat_new_path(mode, custom_phrase, rest)
     if new_path is None:
         return None
-    new_body: str = f"from {leading_ws}{new_path}{import_clause}  {COMPAT_TAG}"
+    new_body: str = f"{leading_ws}from {new_path}{import_clause}  {COMPAT_TAG}"
     if new_body == body:
         return None
     return new_body + ending
@@ -845,7 +873,7 @@ async def _handle_stage_command(args: list[str]) -> None:
             sys.exit(1)
         mode: str = args[1]
         target: str = args[2]
-        if mode not in COMPAT_BUILTIN_PREFIXES and mode != "custom":
+        if mode not in COMPAT_MODES and mode != "custom":
             _print_status("help", "Usage: n2 stage compat <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> <publication|directory> [custom-phrase]", "warning")
             sys.exit(1)
         custom_phrase: str = ""
@@ -1438,7 +1466,7 @@ async def main() -> None:
                 sys.exit(1)
             compat_target: str = sys.argv[3]
             compat_mode: str = sys.argv[2]
-            if compat_mode not in COMPAT_BUILTIN_PREFIXES and compat_mode != "custom":
+            if compat_mode not in COMPAT_MODES and compat_mode != "custom":
                 _print_status("help", "Usage: n2 compat <publication|directory> <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
                 sys.exit(1)
             compat_custom_phrase: str = ""
