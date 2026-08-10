@@ -1,5 +1,7 @@
 # Wednesware Sourcegen
 
+NOTE: This repository is no longer a template repository as GitHub templates do not fit our goal exactly. Instead, see the **How to start** section for info.
+
 ## Info
 
 * Wednesware Sourcegen is a stripped-down fork of [Nitrogen](https://github.com/Wednesware/Nitrogen).
