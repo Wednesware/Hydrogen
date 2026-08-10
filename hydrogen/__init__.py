@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from urllib.request import urlretrieve
 
 
-SOURCEGEN_VERSION: str = "26.3" # SHOULD NOT BE CHANGED
+SOURCEGEN_VERSION: str = "26.5" # SHOULD NOT BE CHANGED
 
 NAME: str = "Hydrogen" # TODO
 DESCRIPTION: str = "Official and community-made distribution installer." # TODO
@@ -70,6 +70,9 @@ EXTENSIONS_DIR: str = os.path.join(os.path.dirname(__file__), "extensions")
 TRUSTED_EXTENSIONS_FILE: str = os.path.join(os.path.dirname(__file__), ".TRUSTED_EXTENSIONS")
 LEN_PATH: str = os.path.join(os.path.dirname(__file__), "ww", "len")
 NITROSTAGED_FILE: str = ".nitrostaged"
+# "internal" installs live inside the nitrogen package itself (not the cwd), so commands like
+INTERNAL_WW_DIR: str = os.path.join(os.path.dirname(__file__), "ww")
+INTERNAL_TEMP_DIR: str = os.path.join(INTERNAL_WW_DIR, "temp")
 
 running_installs: dict[tuple[str, str, str], asyncio.Task] = {}
 
@@ -112,12 +115,15 @@ def _print_help() -> None:
     print(f"  {COMMAND} <command> [args]")
     print()
     _print_section("General")
-    _print_command("get <publication> [release]", "Download a Wednesware publication from GitHub.") # TODO 
-    _print_command("getlib <project> <publication> [release]", "Download a Wednesware publication into <project>/libraries/ww.") # TODO
+    _print_command("get <publication> [release]", "Download a Wednesware publication from GitHub.")
+    _print_command("getlib <project> <publication> [release]", "Download a Wednesware publication into '<project>/libraries/ww'.")
     _print_command("rm <publication> [release]", "Delete one release or all installed releases for a publication.")
     _print_command("getdep [path]", "Install missing dependencies from a .nitrodep file, including nested ones.")
     _print_command("forcegetdep [path]", "Install all dependencies, regardless of whether they are already installed from a .nitrodep file, including nested ones, forcing reinstallation of all dependencies.")
-    _print_command("updlibs <project>", "Reinstall all libraries in <project>/libraries/ww from their exact installed versions.")
+    _print_command("updlibs <project>", "Reinstall all libraries in '<project>/libraries/ww' from their exact installed versions.")
+    _print_command("getinternal <publication> [release]", "Same as `get` into `nitrogen/ww` instead of './ww'.")
+    _print_command("rminternal <publication> [release]", "Same as `rm` but for `nitrogen/ww`.")
+    _print_command("getdepinternal [path]", "Same as `getdep` but for `nitrogen/ww` instead of './ww'.")
     print()
     _print_section("Compatibility")
     _print_command("compat <mode> <publication|directory> [custom-phrase]", "Rewrite Wednesware imports in a directory to match the specified compatibility mode.")
@@ -126,7 +132,7 @@ def _print_help() -> None:
     _print_command("compat rel-up1 <publication|directory>", "Use 'rel-up1' for packages found in '<project>/../'.")
     _print_command("compat rel-up2 <publication|directory>", "Use 'rel-up2' for packages found in '<project>/../../'.")
     _print_command("compat rel-up3 <publication|directory>", "Use 'rel-up3' for packages found in '<project>/../../../'.")
-    _print_command("compat abs-ww <publication|directory>", "Use 'ww' for packages found in './ww'. Default compat mode.")
+    _print_command("compat abs-ww <publication|directory>", "Use 'abs-ww' for packages found in './ww'. Default compat mode.")
     _print_command("compat rel-ww <publication|directory>", "Use 'rel-ww' for packages found in '<project>/ww' with relative imports.")
     _print_command("compat rel-libs-ww <publication|directory>", "Use 'rel-libs-ww' for Helium projects or packages found in '<project>/libraries/ww' with relative imports.")
     _print_command("compat custom <publication|directory> <custom-phrase>", "Use 'custom' to specify a custom phrase for the import prefix.")
@@ -143,19 +149,21 @@ def _print_help() -> None:
     _print_command("stage rmlib <project> <publication> [release]", "Stage library removal from ./<project>/libraries/ww.")
     _print_command("stage compat <mode> <publication|directory> [custom-phrase]", "Stage compatibility rewrite for Wednesware imports in a directory.")
     _print_command("stage cmd <command>", "Stage a shell command to run during stage execute/commit.")
+    _print_command("stage getinternal <publication> [release]", "Stage a dependency install into nitrogen/ww.")
+    _print_command("stage rminternal <publication> [release]", "Stage dependency removal from nitrogen/ww.")
+    _print_command("stage getdepinternal [target]", "Stage running getdep against nitrogen/ww at ./<target>.")
     _print_command("stage cancel [subcommand|last] [args]", "Cancel one staged line, the last line, or the full stage.")
     _print_command("stage execute", "Execute staged actions in exact order.")
     _print_command("stage commit", "Execute staged installs/removals in batched mode.")
     print()
     _print_section("Build")
-    _print_command("build zip [source path(. by default)] [output path(build.zip by default)]", f"Build the current {NAME} project into a zip archive.")
-    _print_command("build targz [source path(. by default)] [output path(build.tar.gz by default)]", f"Build the current {NAME} project into a tar.gz archive.")
-    _print_command("build n2x [source path(. by default)] [output path(build.n2x by default)]", f"Build a {NAME} extension archive from the required extension files.")
-    _print_command("build py [source path(. by default)] [output path(build.py by default)]", "Generate a setup.py file interactively.")
+    _print_command("build zip [source path(. by default)] [output path(build.zip by default)]", "Build the current Nitrogen project into a zip archive.")
+    _print_command("build targz [source path(. by default)] [output path(build.tar.gz by default)]", "Build the current Nitrogen project into a tar.gz archive.")
+    _print_command("build n2x [source path(. by default)] [output path(build.n2x by default)]", "Build a Nitrogen extension archive from the required extension files.")
     print()
     _print_section("Documentation")
-    _print_command("readme [extension]", f"Show the README for {NAME} or an installed extension.")
-    _print_command("license [extension]", f"Show the license for {NAME} or an installed extension.")
+    _print_command("readme [extension]", "Show the README for Nitrogen or an installed extension.")
+    _print_command("license [extension]", "Show the license for Nitrogen or an installed extension.")
     _print_command("help", "Show this help message.")
     print()
     _print_section("Extensions")
@@ -167,7 +175,6 @@ def _print_help() -> None:
     _print_command("list-len", "List available extensions in LEN.")
     _print_command("load-len", "Clone the LEN repository locally.")
     _print_command("unload-len", "Remove the local LEN checkout.")
-
 
 def _print_installed_extensions() -> None:
     _print_section("Installed extensions")
@@ -204,8 +211,8 @@ def parsepub(pub: str) -> str:
     return pub
 
 
-def _publication_dirname(pub: str, rel: str) -> str:
-    return os.path.join("ww", _publication_leaf(pub, rel))
+def _publication_dirname(pub: str, rel: str, root: str = "ww") -> str:
+    return os.path.join(root, _publication_leaf(pub, rel))
 
 
 def _publication_leaf(pub: str, rel: str) -> str:
@@ -362,10 +369,26 @@ COMPAT_BUILTIN_PREFIXES: dict[str, str] = {
     "rel-ww": ".ww",
     "rel-libs-ww": ".libraries.ww",
 }
-# matches a `from ww...` import, capturing indent, the sub-path after `ww`, and the import clause
+COMPAT_TAG: str = "#COMPAT"
+# Each compat mode is pure data: a prefix plus a join strategy, so adding a new mode never
+# requires touching the transform logic below - just add an entry here.
+#   "dot"      -> collapse the boundary between a trailing "." on the prefix and the sub-path's
+#                 leading "." into a single "." (namespace-style prefixes, e.g. "ww.", ".ww.")
+#   "raw"      -> concatenate prefix and sub-path verbatim, no collapsing (every "." is
+#                 meaningful, e.g. "up N levels" relative prefixes)
+#   "strip"    -> drop the sub-path's own leading "." entirely (plain absolute imports)
+#   "identity" -> the sub-path is already in canonical form; only the empty-path fallback is used
+COMPAT_MODES: dict[str, tuple[str, str]] = {
+    "abs-ww": ("ww.", "dot"),
+    "abs": ("", "strip"),
+    "rel": (".", "identity"),
+    "rel-up1": ("..", "raw"),
+    "rel-up2": ("...", "raw"),
+    "rel-up3": ("....", "raw"),
+    "rel-ww": (".ww.", "dot"),
+    "rel-libs-ww": (".libraries.ww.", "dot"),
+}
 _COMPAT_LINE_RE = re.compile(r'^(\s*)from\s+(?:\.?(?:libraries\.)?)ww(\.[^\s]*|)(\s+import\s+.*)$')
-# matches any already-tagged `from <path> import ...` line, since a prior compat run may have
-# stripped the literal "ww" from the path (e.g. "rel"/"abs" modes), so it can't be matched by _COMPAT_LINE_RE
 _COMPAT_TAGGED_LINE_RE = re.compile(r'^(\s*)from\s+(\S+)(\s+import\s+.*)$')
 
 def _compat_new_path(mode: str, custom_phrase: str, rest: str) -> str | None:
@@ -565,7 +588,7 @@ def _run_staged_command(command: str) -> None:
         raise SystemExit(result.returncode)
 
 
-def _queue_install_to_root(pub: str, rel: str, install_root: str, reinstall: bool = True) -> asyncio.Task:
+def _queue_install_to_root(pub: str, rel: str, install_root: str, reinstall: bool = True, work_dir: str = ".") -> asyncio.Task:
     resolved_pub: str = parsepub(pub)
     key: tuple[str, str, str] = (resolved_pub.lower(), rel, os.path.realpath(install_root))
     if key in running_installs:
@@ -573,7 +596,7 @@ def _queue_install_to_root(pub: str, rel: str, install_root: str, reinstall: boo
         return running_installs[key]
 
     _print_status("queue", f"{resolved_pub.lower()} {rel} -> {install_root}", "info")
-    task: asyncio.Task = asyncio.create_task(asyncio.to_thread(_install_publication_to_root, resolved_pub, rel, install_root, reinstall))
+    task: asyncio.Task = asyncio.create_task(asyncio.to_thread(_install_publication_to_root, resolved_pub, rel, install_root, reinstall, work_dir))
     running_installs[key] = task
 
     def cleanup(completed_task: asyncio.Task, install_key: tuple[str, str, str] = key) -> None:
@@ -748,10 +771,9 @@ async def _run_staged(mode: str) -> None:
     _write_stage_lines([])
     _print_status("done", f"Stage completed in {mode} mode.", "success")
 
-
 async def _handle_stage_command(args: list[str]) -> None:
     if not args:
-        _print_status("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|cancel|execute|commit> [...]", "warning")
+        _print_status("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|getinternal|rminternal|getdepinternal|cancel|execute|commit> [...]", "warning")
         sys.exit(1)
 
     subcommand: str = args[0].lower()
@@ -844,14 +866,43 @@ async def _handle_stage_command(args: list[str]) -> None:
         _append_stage_line(f"RMLIB|{project}|{pub}|{rel}")
         _print_status("stage", f"Staged rmlib {project} {pub} {rel}", "success")
         return
-    
+
+    if subcommand == "getinternal":
+        if len(args) < 2:
+            _print_status("help", f"Usage: {COMMAND} stage getinternal <publication> [release]", "warning")
+            sys.exit(1)
+        pub = parsepub(args[1]).lower()
+        rel = args[2] if len(args) > 2 else "latest"
+        _append_stage_line(f"GETINTERNAL|{pub}|{rel}")
+        _print_status("stage", f"Staged getinternal {pub} {rel}", "success")
+        return
+
+    if subcommand == "rminternal":
+        if len(args) < 2:
+            _print_status("help", f"Usage: {COMMAND} stage rminternal <publication> [release]", "warning")
+            sys.exit(1)
+        pub = parsepub(args[1]).lower()
+        rel = args[2] if len(args) > 2 else "latest"
+        _append_stage_line(f"RMINTERNAL|{pub}|{rel}")
+        _print_status("stage", f"Staged rminternal {pub} {rel}", "success")
+        return
+
+    if subcommand == "getdepinternal":
+        if len(args) > 2:
+            _print_status("help", f"Usage: {COMMAND} stage getdepinternal [target]", "warning")
+            sys.exit(1)
+        target = args[1] if len(args) > 1 else "."
+        _append_stage_line(f"GETDEPINTERNAL|{target}")
+        _print_status("stage", f"Staged getdepinternal {target}", "success")
+        return
+
     if subcommand == "compat":
         if len(args) < 3:
             _print_status("help", f"Usage: {COMMAND} stage compat <mode> <publication|directory> [custom-phrase]", "warning")
             sys.exit(1)
         mode: str = args[1]
         target: str = args[2]
-        if mode not in COMPAT_BUILTIN_PREFIXES and mode != "custom":
+        if mode not in COMPAT_MODES and mode != "custom":
             _print_status("help", f"Usage: {COMMAND} stage compat <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> <publication|directory> [custom-phrase]", "warning")
             sys.exit(1)
         custom_phrase: str = ""
@@ -893,7 +944,7 @@ async def _handle_stage_command(args: list[str]) -> None:
         command_name: str = args[1].lower()
         tag: str | None = _stage_tag_for_command(command_name)
         if tag is None:
-            _print_status("help", f"Usage: {COMMAND} stage cancel [get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|last] [args]", "warning")
+            _print_status("help", f"Usage: {COMMAND} stage cancel [get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|getinternal|rminternal|getdepinternal|last] [args]", "warning")
             sys.exit(1)
 
         target_line: str | None = None
@@ -973,6 +1024,26 @@ async def _handle_stage_command(args: list[str]) -> None:
                 sys.exit(1)
             command = " ".join(args[2:])
             target_line = f"RUNCMD|{command}"
+        elif tag == "GETINTERNAL":
+            if len(args) < 3:
+                _print_status("help", f"Usage: {COMMAND} stage cancel getinternal <publication> [release]", "warning")
+                sys.exit(1)
+            publication = parsepub(args[2]).lower()
+            release = args[3] if len(args) > 3 else "latest"
+            target_line = f"GETINTERNAL|{publication}|{release}"
+        elif tag == "RMINTERNAL":
+            if len(args) < 3:
+                _print_status("help", f"Usage: {COMMAND} stage cancel rminternal <publication> [release]", "warning")
+                sys.exit(1)
+            publication = parsepub(args[2]).lower()
+            release = args[3] if len(args) > 3 else "latest"
+            target_line = f"RMINTERNAL|{publication}|{release}"
+        elif tag == "GETDEPINTERNAL":
+            if len(args) > 3:
+                _print_status("help", f"Usage: {COMMAND} stage cancel getdepinternal [target]", "warning")
+                sys.exit(1)
+            target = args[2] if len(args) > 2 else "."
+            target_line = f"GETDEPINTERNAL|{target}"
 
         if target_line is None:
             _print_status("fail", "Could not build a stage target for cancellation.", "error")
@@ -993,10 +1064,9 @@ async def _handle_stage_command(args: list[str]) -> None:
         return
 
     _print_status("help", f"Unknown stage subcommand: {subcommand}", "warning")
-    _print_status("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|cancel|execute|commit> [...]", "warning")
+    _print_status("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|getinternal|rminternal|getdepinternal|cancel|execute|commit> [...]", "warning")
     sys.exit(1)
-
-
+    
 async def _reinstall_project_libraries(project: str) -> None:
     install_root: str = os.path.join(project, "libraries", "ww")
     if not os.path.isdir(install_root):
@@ -1039,18 +1109,18 @@ async def _reinstall_project_libraries(project: str) -> None:
 def _install_publication(pub: str, rel: str, reinstall: bool = True) -> InstallResult:
     return _install_publication_to_root(pub, rel, "ww", reinstall)
 
-def _install_publication_to_root(pub: str, rel: str, install_root: str, reinstall: bool = True) -> InstallResult:
-    # TODO: customize install process here
+def _install_publication_to_root(pub: str, rel: str, install_root: str, reinstall: bool = True, work_dir: str = ".") -> InstallResult:
     pub = parsepub(pub)
     pub_lower: str = pub.lower()
     dirname: str = os.path.join(install_root, _publication_leaf(pub, rel))
     release_token: str = _release_token(rel)
-    archive_path: str = f"{pub_lower}-{release_token}.zip"
-    extract_dir: str = f"{pub_lower}-repo-{release_token}"
-    url: str = f"https://github.com/Wednesware/{pub.capitalize()}/archive/refs/heads/main.zip" if rel == "beta" else f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub_lower}.zip" # TODO
+    archive_path: str = os.path.join(work_dir, f"{pub_lower}-{release_token}.zip")
+    extract_dir: str = os.path.join(work_dir, f"{pub_lower}-repo-{release_token}")
+    url: str = f"https://github.com/Wednesware/{pub.capitalize()}/archive/refs/heads/main.zip" if rel == "beta" else f"https://github.com/Wednesware/{pub.capitalize()}/releases/{rel + '/download' if rel == 'latest' else 'download/' + rel}/{pub_lower}.zip"
     try:
         if os.path.exists(dirname) and not reinstall:
             return InstallResult("info", [f"{pub_lower} {rel}: Publication is already installed."])
+        os.makedirs(work_dir, exist_ok=True)
         try:
             urlretrieve(
                 url,
@@ -1085,12 +1155,11 @@ def _install_publication_to_root(pub: str, rel: str, install_root: str, reinstal
             os.remove(archive_path)
 
 
-def _queue_install(pub: str, rel: str, reinstall: bool = True) -> asyncio.Task:
-    return _queue_install_to_root(pub, rel, "ww", reinstall)
+def _queue_install(pub: str, rel: str, reinstall: bool = True, install_root: str = "ww", work_dir: str = ".") -> asyncio.Task:
+    return _queue_install_to_root(pub, rel, install_root, reinstall, work_dir)
 
-
-async def install_async(pub: str, rel: str, reinstall: bool = True, color: bool = True, emit: bool = True, fatal: bool = True) -> InstallResult:
-    result: InstallResult = await _queue_install(pub, rel, reinstall)
+async def install_async(pub: str, rel: str, reinstall: bool = True, color: bool = True, emit: bool = True, fatal: bool = True, install_root: str = "ww", work_dir: str = ".") -> InstallResult:
+    result: InstallResult = await _queue_install(pub, rel, reinstall, install_root, work_dir)
     if emit:
         _print_install_result(result, color)
     if fatal and result.exit_code:
@@ -1098,7 +1167,7 @@ async def install_async(pub: str, rel: str, reinstall: bool = True, color: bool 
     return result
 
 
-async def _getdep_recursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[tuple[str, str]] | None = None, force: bool = False) -> None:
+async def _getdep_recursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[tuple[str, str]] | None = None, force: bool = False, install_root: str = "ww", work_dir: str = ".") -> None:
     dep_path: str = _dependency_file_path(path)
     if visited is None:
         visited = set()
@@ -1152,7 +1221,7 @@ async def _getdep_recursive(path: str, color: bool = True, log: bool = True, vis
         pending_deps.append((pub, rel))
     if print_tip:
         _print_status("deny", "To allow scripts, re-run with '--allow'. To skip scripts, re-run with '--skip'.", "info")
-    tasks: list[asyncio.Task] = [_queue_install(pub, rel, (rel == "latest") or force) for pub, rel in pending_deps]
+    tasks: list[asyncio.Task] = [_queue_install(pub, rel, (rel == "latest") or force, install_root, work_dir) for pub, rel in pending_deps]
     results: list[InstallResult] = await asyncio.gather(*tasks)
     for result in results:
         _print_install_result(result, color)
@@ -1164,16 +1233,15 @@ async def _getdep_recursive(path: str, color: bool = True, log: bool = True, vis
         raise SystemExit(1)
 
     for pub, rel in deps:
-        installed_dep_path: str = _dependency_file_path(_publication_dirname(parsepub(pub), rel))
-        await _getdep_recursive(installed_dep_path, color=color, log=False, visited=visited, installed=installed)
+        installed_dep_path: str = _dependency_file_path(_publication_dirname(parsepub(pub), rel, install_root))
+        await _getdep_recursive(installed_dep_path, color=color, log=False, visited=visited, installed=installed, install_root=install_root, work_dir=work_dir)
     if log:
         _print_status("done", "All dependencies are ready.", "success")
                 
-async def getdep(path: str, color: bool = True, log: bool = True, force: bool = False) -> None:
-    await _getdep_recursive(path, color=color, log=log, force=force)
+async def getdep(path: str, color: bool = True, log: bool = True, force: bool = False, install_root: str = "ww", work_dir: str = ".") -> None:
+    await _getdep_recursive(path, color=color, log=log, force=force, install_root=install_root, work_dir=work_dir)
 
-
-async def getdep_everywhere(path: str, color: bool = True, force: bool = False) -> None:
+async def getdep_everywhere(path: str, color: bool = True, force: bool = False, install_root: str = "ww", work_dir: str = ".") -> None:
     dep_files: list[str] = _find_nitrodep_files(path)
     if not dep_files:
         _print_status("miss", f"No .nitrodep files found under '{path}'.", "warning")
@@ -1183,17 +1251,16 @@ async def getdep_everywhere(path: str, color: bool = True, force: bool = False) 
     visited: set[str] = set()
     installed: set[tuple[str, str]] = set()
     for dep_file in dep_files:
-        await _getdep_recursive(dep_file, color=color, log=True, visited=visited, installed=installed, force=force)
+        await _getdep_recursive(dep_file, color=color, log=True, visited=visited, installed=installed, force=force, install_root=install_root, work_dir=work_dir)
 
-
-async def _install_subdependencies(pub: str, rel: str, color: bool = True) -> None:
+async def _install_subdependencies(pub: str, rel: str, color: bool = True, install_root: str = "ww", work_dir: str = ".") -> None:
     resolved_pub: str = parsepub(pub)
-    dep_path: str = _dependency_file_path(_publication_dirname(resolved_pub, rel))
+    dep_path: str = _dependency_file_path(_publication_dirname(resolved_pub, rel, install_root))
     _print_status("deps", f"Checking sub-dependencies for {resolved_pub.lower()} {rel}", "info")
     if not os.path.isfile(dep_path):
         _print_status("info", "No sub-dependencies declared.", "muted")
         return
-    await getdep(dep_path, color=color, log=True)
+    await getdep(dep_path, color=color, log=True, install_root=install_root, work_dir=work_dir)
         
 def trust(ext_filename: str, ext_dir_path: str) -> None:
     ext_path: str = os.path.join(EXTENSIONS_DIR, ext_filename)
@@ -1255,8 +1322,7 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
             "zip": "zip",
             "targz": "tar.gz",
             "n2x": "n2x",
-            "modm": "modm",
-            "py": "py"
+            "modm": "modm"
         }[format])
     except KeyError:
         _print_status("fail", f"Unknown build format '{format}'.", "error")
@@ -1322,45 +1388,6 @@ async def build(format: str, source_path: str = ".", output_path: str = "build.%
                         _print_status("pack", f"Packing {arcname}", "info")
                         tar.add(file_path, arcname=arcname)
             _print_status("done", f"Build complete in {output_path}", "success")
-        case "py":
-            _print_status("build", f"Building project into {output_path}...", "info")
-            _print_status("deps", "Installing build dependencies...", "info")
-            await asyncio.gather(
-                install_async("magnesium", "26.11", False),
-                install_async("iodine", "26.2", False),
-            )
-            from ww.i26_2 import run # type: ignore
-            from ww.i26_2.widgets.text_input import TextInput # type: ignore
-            with open(output_path, "w") as file:
-                file.write(f"""
-from setuptools import setup, find_packages
-                           
-setup(
-    name="{run(TextInput('Project name: ', placeholder='myproject'))}",
-    version="{run(TextInput('Project version: ', placeholder='26.1'))}",
-    py_modules=[],
-    entry_points={{
-        "console_scripts": [
-            "{run(TextInput('Command: ', placeholder='myprjct=myproject.cli:main'))}",
-        ],
-    }},
-    author="{run(TextInput('Author name: ', placeholder='Your Name'))}",
-    author_email="{run(TextInput('Author email: ', placeholder='you@email.com'))}",
-    description="{run(TextInput('Short, one-line description: ', placeholder='...'))}",
-    long_description=open("README.md", "r", encoding="utf-8").read(),
-    long_description_content_type="text/markdown",
-    url="{run(TextInput('Project URL (example: GitHub page): ', placeholder='https://myproject.com'))}",
-    packages=find_packages(),
-    install_requires=[],
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "Operating System :: OS Independent",
-    ],
-    python_requires=">=3.12",
-    license="MIT"
-)              
-""".strip())
-            shutil.rmtree("ww/i26_2")
         case _:
             _print_status("fail", f"Unknown build format '{format}'.", "error")
 
@@ -1480,11 +1507,57 @@ async def main() -> None:
                 compat_total_files += files_changed
                 compat_total_lines += lines_changed
             _print_status("done", f"Updated {compat_total_lines} line{'s' if compat_total_lines != 1 else ''} across {compat_total_files} file{'s' if compat_total_files != 1 else ''}.", "success")
+        case "getinternal":
+            if len(sys.argv) == 2:
+                _print_status("help", "Usage: n2 getinternal <publication> [release]", "warning")
+                sys.exit(1)
+            pub = sys.argv[2]
+            rel = sys.argv[3] if len(sys.argv) > 3 else "latest"
+            result = await install_async(pub, rel, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
+            if not result.exit_code:
+                await _install_subdependencies(pub, rel, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
+        case "rminternal":
+            if len(sys.argv) == 2:
+                _print_status("help", "Usage: n2 rminternal <publication> [release]", "warning")
+                sys.exit(1)
+            pub = parsepub(sys.argv[2])
+            _print_status("rm", f"Deleting {pub}", "info")
+            if pub.strip() == "all":
+                if os.path.isdir(INTERNAL_WW_DIR):
+                    for entry in os.listdir(INTERNAL_WW_DIR):
+                        if entry in ("len", "temp"):
+                            continue
+                        entry_path: str = os.path.join(INTERNAL_WW_DIR, entry)
+                        if os.path.isdir(entry_path):
+                            shutil.rmtree(entry_path)
+                        else:
+                            os.remove(entry_path)
+                else:
+                    _print_status("info", "No publications installed.", "muted")
+            elif pub in PUBLICATION_CACHE or pub in REVERSE_PUBLICATION_CACHE:
+                if len(sys.argv) > 3:
+                    rel = sys.argv[3]
+                    deleted = _remove_publication_versions(INTERNAL_WW_DIR, pub, rel)
+                    if deleted:
+                        _print_status("done", "Operation complete.", "success")
+                    else:
+                        _print_status("miss", f"Release '{rel}' of publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
+                else:
+                    deleted = _remove_publication_versions(INTERNAL_WW_DIR, pub)
+                    if deleted:
+                        _print_status("done", "Operation complete.", "success")
+                    else:
+                        _print_status("miss", f"Publication '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
+            else:
+                _print_status("miss", f"Could not find publication '{pub.capitalize()}'. Are you sure you spelled it right?", "warning")
+        case "getdepinternal":
+            path = sys.argv[2] if len(sys.argv) > 2 else "."
+            await getdep_everywhere(path, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
         case "stage":
             await _handle_stage_command(sys.argv[2:])
         case "build":
             if len(sys.argv) == 2:
-                _print_status("help", f"Usage: {COMMAND} build <format(zip|targz|n2x|modm|py)> [source path] [output path]", "warning")
+                _print_status("help", f"Usage: {COMMAND} build <format(zip|targz|n2x|modm)> [source path] [output path]", "warning")
                 sys.exit(1)
             await build(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ".", sys.argv[4] if len(sys.argv) > 4 else "build.%")
         case "readme":
