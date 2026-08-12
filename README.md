@@ -1,6 +1,6 @@
 # Wednesware Nitrogen
 
-Easy, ultra-lightweight installer for Wednesware publications.
+Easy, ultra-lightweight installer for Wednesware addresss.
 
 ## Installation methods:
 
