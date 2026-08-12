@@ -1,4 +1,4 @@
-import sys, zipfile, shutil, os, urllib.error, subprocess, traceback, tarfile, asyncio, re, tempfile, platform
+import sys, zipfile, shutil, os, json, subprocess, traceback, tarfile, asyncio, re, tempfile, platform, urllib
 from dataclasses import dataclass, field
 from urllib.request import urlretrieve
 
@@ -37,7 +37,7 @@ DSTBS_DIR: str = {
 
 running_installs: dict[tuple[str, str], asyncio.Task] = {}
 
-def getAddress(address: str) -> dict:
+def getAddressInfo(address: str) -> dict:
     address = address.strip()
     if not address:
         raise ValueError("Address is empty.")
@@ -312,6 +312,9 @@ def stageTagForCommand(command: str) -> str | None:
         "rm": "RM",
         "rmlib": "RMLIB",
         "cmd": "RUNCMD",
+        "getinternal": "GETINTERNAL",
+        "rminternal": "RMINTERNAL",
+        "getdepinternal": "GETDEPINTERNAL",
     }.get(command.lower())
 
 
@@ -483,16 +486,19 @@ def parseStageLine(line: str) -> StageAction | None:
     action: str = parts[0]
     args: list[str] = parts[1:]
     arity: dict[str, int] = {
-        "ADDDEP": 2,
-        "ADDLIB": 3,
-        "ADDNDEP": 2,
-        "RMNDEP": 2,
+        "ADDDEP": 1,
+        "ADDLIB": 2,
+        "ADDNDEP": 1,
+        "RMNDEP": 1,
         "GETDEP": 1,
         "FORCEGETDEP": 1,
         "UPDLIBS": 1,
-        "RMDEP": 2,
-        "RMLIB": 3,
+        "RMDEP": 1,
+        "RMLIB": 2,
         "COMPAT": 3,
+        "GETINTERNAL": 1,
+        "RMINTERNAL": 1,
+        "GETDEPINTERNAL": 1,
     }
     if action not in arity:
         return None
@@ -508,11 +514,6 @@ def runStagedCommand(command: str) -> None:
         printStatus("fail", f"Command failed with exit code {result.returncode}: {command}", "error")
         raise SystemExit(result.returncode)
 
-
-def _install_address_to_root(address: str, install_root: str, reinstall: bool = True, work_dir: str = ".") -> InstallResult:
-    return installAddressToRoot(address, install_root, reinstall, work_dir)
-
-
 def queueInstallToRoot(address: str, install_root: str = "ww", reinstall: bool = True, work_dir: str = ".") -> asyncio.Task:
     resolved_address: str = address
     key: tuple[str, str] = (resolved_address.lower(), os.path.realpath(install_root))
@@ -521,7 +522,7 @@ def queueInstallToRoot(address: str, install_root: str = "ww", reinstall: bool =
         return running_installs[key]
 
     printStatus("queue", f"{resolved_address.lower()} -> {install_root}", "info")
-    task: asyncio.Task = asyncio.create_task(asyncio.to_thread(_install_address_to_root, resolved_address, install_root, reinstall, work_dir))
+    task: asyncio.Task = asyncio.create_task(asyncio.to_thread(installDistroToRoot, resolved_address, install_root, reinstall, work_dir))
     running_installs[key] = task
 
     def cleanup(completed_task: asyncio.Task, install_key: tuple[str, str] = key) -> None:
@@ -535,48 +536,62 @@ def queueInstallToRoot(address: str, install_root: str = "ww", reinstall: bool =
 async def executeStageOrdered(actions: list[StageAction]) -> None:
     for action in actions:
         if action.action == "ADDDEP":
-            address, version = action.args
-            result: InstallResult = await queueInstallToRoot(address, version, "ww", True)
+            address = action.args[0]
+            result: InstallResult = await queueInstallToRoot(address, "ww", True)
             printInstallResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         elif action.action == "ADDLIB":
-            project, address, version = action.args
+            project, address = action.args
             install_root: str = os.path.join(project, "libraries", "ww")
-            result = await queueInstallToRoot(address, version, install_root, True)
+            result = await queueInstallToRoot(address, install_root, True)
             printInstallResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         elif action.action == "ADDNDEP":
-            address, version = action.args
-            if addHydrodepDependency(".", address, version):
-                printStatus("done", f"Added dependency '{address} {version}' to ./.hydrodep.", "success")
+            address = action.args[0]
+            if addHydrodepDependency(".", address):
+                printStatus("done", f"Added dependency '{address}' to ./.hydrodep.", "success")
             else:
-                printStatus("info", f"Dependency '{address} {version}' is already in ./.hydrodep.", "muted")
+                printStatus("info", f"Dependency '{address}' is already in ./.hydrodep.", "muted")
         elif action.action == "RMNDEP":
-            address, version = action.args
-            if removeHydrodepDependency(".", address, version):
-                printStatus("done", f"Removed dependency '{address} {version}' from ./.hydrodep.", "success")
+            address = action.args[0]
+            if removeHydrodepDependency(".", address):
+                printStatus("done", f"Removed dependency '{address}' from ./.hydrodep.", "success")
             else:
-                printStatus("miss", f"Dependency '{address} {version}' was not found in ./.hydrodep.", "warning")
+                printStatus("miss", f"Dependency '{address}' was not found in ./.hydrodep.", "warning")
         elif action.action == "GETDEP":
             target = action.args[0]
             await getDepEverywhere(target)
+        elif action.action == "GETDEPINTERNAL":
+            target = action.args[0]
+            await getDepEverywhere(target, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
         elif action.action == "FORCEGETDEP":
             target = action.args[0]
             await getDepEverywhere(target, force=True)
         elif action.action == "UPDLIBS":
             project = action.args[0]
             await reinstallProjectLibraries(project)
+        elif action.action == "GETINTERNAL":
+            address = action.args[0]
+            result = await installAsync(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
+            printInstallResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+            await installSubdependencies(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
+        elif action.action == "RMINTERNAL":
+            address = action.args[0]
+            deleted: int = removeAddressVersions(INTERNAL_WW_DIR, address)
+            printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from {INTERNAL_WW_DIR}.", "success")
         elif action.action == "RMDEP":
-            address, version = action.args
-            deleted: int = removeAddressVersions("ww", address, version)
-            printStatus("done", f"Removed {deleted} version{'s' if deleted != 1 else ''} of '{address}' ({version}) from ./ww.", "success")
+            address = action.args[0]
+            deleted: int = removeAddressVersions("ww", address)
+            printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./ww.", "success")
         elif action.action == "RMLIB":
-            project, address, version = action.args
+            project, address = action.args
             install_root = os.path.join(project, "libraries", "ww")
-            deleted = removeAddressVersions(install_root, address, version)
-            printStatus("done", f"Removed {deleted} version{'s' if deleted != 1 else ''} of '{address}' ({version}) from ./{project}/libraries/ww.", "success")
+            deleted = removeAddressVersions(install_root, address)
+            printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./{project}/libraries/ww.", "success")
         elif action.action == "RUNCMD":
             runStagedCommand(action.args[0])
         elif action.action == "COMPAT":
@@ -586,34 +601,34 @@ async def executeStageOrdered(actions: list[StageAction]) -> None:
 
 
 async def commitStageBatched(actions: list[StageAction]) -> None:
-    add_dep: list[tuple[str, str]] = []
-    add_lib: list[tuple[str, str, str]] = []
-    rm_dep: list[tuple[str, str]] = []
-    rm_lib: list[tuple[str, str, str]] = []
+    add_dep: list[str] = []
+    add_lib: list[tuple[str, str]] = []
+    rm_dep: list[str] = []
+    rm_lib: list[tuple[str, str]] = []
 
     for action in actions:
         if action.action == "ADDDEP":
-            add_dep.append((action.args[0], action.args[1]))
+            add_dep.append(action.args[0])
         elif action.action == "ADDLIB":
-            add_lib.append((action.args[0], action.args[1], action.args[2]))
+            add_lib.append((action.args[0], action.args[1]))
         elif action.action == "RMDEP":
-            rm_dep.append((action.args[0], action.args[1]))
+            rm_dep.append(action.args[0])
         elif action.action == "RMLIB":
-            rm_lib.append((action.args[0], action.args[1], action.args[2]))
+            rm_lib.append((action.args[0], action.args[1]))
 
-    add_dep_address: set[tuple[str, str]] = {(address, version) for address, version in add_dep}
-    rm_dep_address: set[tuple[str, str]] = {(address, version) for address, version in rm_dep}
-    dep_conflicts: set[tuple[str, str]] = add_dep_address & rm_dep_address
+    add_dep_address: set[str] = set(add_dep)
+    rm_dep_address: set[str] = set(rm_dep)
+    dep_conflicts: set[str] = add_dep_address & rm_dep_address
     if dep_conflicts:
-        text: str = ", ".join(f"{address} {version}" for address, version in sorted(dep_conflicts))
+        text: str = ", ".join(sorted(dep_conflicts))
         printStatus("fail", f"Cannot commit: adddep and rmdep conflict for {text}", "error")
         raise SystemExit(1)
 
-    add_lib_address: set[tuple[str, str, str]] = {(project, address, version) for project, address, version in add_lib}
-    rm_lib_address: set[tuple[str, str, str]] = {(project, address, version) for project, address, version in rm_lib}
-    lib_conflicts: set[tuple[str, str, str]] = add_lib_address & rm_lib_address
+    add_lib_address: set[tuple[str, str]] = set(add_lib)
+    rm_lib_address: set[tuple[str, str]] = set(rm_lib)
+    lib_conflicts: set[tuple[str, str]] = add_lib_address & rm_lib_address
     if lib_conflicts:
-        text = ", ".join(f"{project}:{address} {version}" for project, address, version in sorted(lib_conflicts))
+        text = ", ".join(f"{project}:{address}" for project, address in sorted(lib_conflicts))
         printStatus("fail", f"Cannot commit: addlib and rmlib conflict in same stage for {text}", "error")
         raise SystemExit(1)
 
@@ -626,34 +641,45 @@ async def commitStageBatched(actions: list[StageAction]) -> None:
                 command_failures = int(err.code) if isinstance(err.code, int) else 1
                 break
         elif action.action == "ADDNDEP":
-            address, version = action.args
-            if addHydrodepDependency(".", address, version):
-                printStatus("done", f"Added dependency '{address} {version}' to ./.hydrodep.", "success")
+            address = action.args[0]
+            if addHydrodepDependency(".", address):
+                printStatus("done", f"Added dependency '{address}' to ./.hydrodep.", "success")
             else:
-                printStatus("info", f"Dependency '{address} {version}' is already in ./.hydrodep.", "muted")
+                printStatus("info", f"Dependency '{address}' is already in ./.hydrodep.", "muted")
         elif action.action == "RMNDEP":
-            address, version = action.args
-            if removeHydrodepDependency(".", address, version):
-                printStatus("done", f"Removed dependency '{address} {version}' from ./.hydrodep.", "success")
+            address = action.args[0]
+            if removeHydrodepDependency(".", address):
+                printStatus("done", f"Removed dependency '{address}' from ./.hydrodep.", "success")
             else:
-                printStatus("miss", f"Dependency '{address} {version}' was not found in ./.hydrodep.", "warning")
+                printStatus("miss", f"Dependency '{address}' was not found in ./.hydrodep.", "warning")
         elif action.action == "GETDEP":
             target = action.args[0]
             await getDepEverywhere(target)
+        elif action.action == "GETDEPINTERNAL":
+            target = action.args[0]
+            await getDepEverywhere(target, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
         elif action.action == "FORCEGETDEP":
             target = action.args[0]
             await getDepEverywhere(target, force=True)
         elif action.action == "UPDLIBS":
             project = action.args[0]
             await reinstallProjectLibraries(project)
+        elif action.action == "GETINTERNAL":
+            address = action.args[0]
+            result = await installAsync(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
+            if result.exit_code:
+                printInstallResult(result)
+                raise SystemExit(result.exit_code)
+            printInstallResult(result)
+            await installSubdependencies(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
     if command_failures:
         raise SystemExit(command_failures)
 
     install_tasks: list[asyncio.Task] = []
-    for address, version in add_dep:
-        install_tasks.append(queueInstallToRoot(address, version, "ww", True))
-    for project, address, version in add_lib:
-        install_tasks.append(queueInstallToRoot(address, version, os.path.join(project, "libraries", "ww"), True))
+    for address in add_dep:
+        install_tasks.append(queueInstallToRoot(address, "ww", True))
+    for project, address in add_lib:
+        install_tasks.append(queueInstallToRoot(address, os.path.join(project, "libraries", "ww"), True))
 
     if install_tasks:
         install_results: list[InstallResult] = await asyncio.gather(*install_tasks)
@@ -665,13 +691,13 @@ async def commitStageBatched(actions: list[StageAction]) -> None:
             printStatus("fail", f"Commit install finished with {install_failures} failure{'s' if install_failures != 1 else ''}.", "error")
             raise SystemExit(1)
 
-    for address, version in rm_dep:
-        deleted: int = removeAddressVersions("ww", address, version)
-        printStatus("done", f"Removed {deleted} version{'s' if deleted != 1 else ''} of '{address}' ({version}) from ./ww.", "success")
-    for project, address, version in rm_lib:
+    for address in rm_dep:
+        deleted: int = removeAddressVersions("ww", address)
+        printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./ww.", "success")
+    for project, address in rm_lib:
         install_root: str = os.path.join(project, "libraries", "ww")
-        deleted = removeAddressVersions(install_root, address, version)
-        printStatus("done", f"Removed {deleted} version{'s' if deleted != 1 else ''} of '{address}' ({version}) from ./{project}/libraries/ww.", "success")
+        deleted = removeAddressVersions(install_root, address)
+        printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./{project}/libraries/ww.", "success")
 
 
 async def runStaged(mode: str) -> None:
@@ -705,43 +731,39 @@ async def handleStageCommand(args: list[str]) -> None:
 
     if subcommand == "get":
         if len(args) < 2:
-            printStatus("help", f"Usage: {COMMAND} stage get <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage get <address>", "warning")
             sys.exit(1)
         address: str = args[1]
-        version: str = args[2] if len(args) > 2 else "latest"
-        appendStageLine(f"ADDDEP|{address}|{version}")
-        printStatus("stage", f"Staged get {address} {version}", "success")
+        appendStageLine(f"ADDDEP|{address}")
+        printStatus("stage", f"Staged get {address}", "success")
         return
 
     if subcommand == "getlib":
         if len(args) < 3:
-            printStatus("help", f"Usage: {COMMAND} stage getlib <project> <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage getlib <project> <address>", "warning")
             sys.exit(1)
         project: str = args[1]
         address = args[2]
-        version = args[3] if len(args) > 3 else "latest"
-        appendStageLine(f"ADDLIB|{project}|{address}|{version}")
-        printStatus("stage", f"Staged getlib {project} {address} {version}", "success")
+        appendStageLine(f"ADDLIB|{project}|{address}")
+        printStatus("stage", f"Staged getlib {project} {address}", "success")
         return
 
     if subcommand == "adddep":
         if len(args) < 2:
-            printStatus("help", f"Usage: {COMMAND} stage adddep <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage adddep <address>", "warning")
             sys.exit(1)
         address = args[1]
-        version = args[2] if len(args) > 2 else "latest"
-        appendStageLine(f"ADDNDEP|{address}|{version}")
-        printStatus("stage", f"Staged adddep {address} {version}", "success")
+        appendStageLine(f"ADDNDEP|{address}")
+        printStatus("stage", f"Staged adddep {address}", "success")
         return
 
     if subcommand == "rmdep":
         if len(args) < 2:
-            printStatus("help", f"Usage: {COMMAND} stage rmdep <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage rmdep <address>", "warning")
             sys.exit(1)
         address = args[1]
-        version = args[2] if len(args) > 2 else "latest"
-        appendStageLine(f"RMNDEP|{address}|{version}")
-        printStatus("stage", f"Staged rmdep {address} {version}", "success")
+        appendStageLine(f"RMNDEP|{address}")
+        printStatus("stage", f"Staged rmdep {address}", "success")
         return
 
     if subcommand == "getdep":
@@ -773,43 +795,39 @@ async def handleStageCommand(args: list[str]) -> None:
 
     if subcommand == "rm":
         if len(args) < 2:
-            printStatus("help", f"Usage: {COMMAND} stage rm <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage rm <address>", "warning")
             sys.exit(1)
         address = args[1]
-        version = args[2] if len(args) > 2 else "latest"
-        appendStageLine(f"RMDEP|{address}|{version}")
-        printStatus("stage", f"Staged rm {address} {version}", "success")
+        appendStageLine(f"RMDEP|{address}")
+        printStatus("stage", f"Staged rm {address}", "success")
         return
 
     if subcommand == "rmlib":
         if len(args) < 3:
-            printStatus("help", f"Usage: {COMMAND} stage rmlib <project> <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage rmlib <project> <address>", "warning")
             sys.exit(1)
         project: str = args[1]
         address = args[2]
-        version = args[3] if len(args) > 3 else "latest"
-        appendStageLine(f"RMLIB|{project}|{address}|{version}")
-        printStatus("stage", f"Staged rmlib {project} {address} {version}", "success")
+        appendStageLine(f"RMLIB|{project}|{address}")
+        printStatus("stage", f"Staged rmlib {project} {address}", "success")
         return
 
     if subcommand == "getinternal":
         if len(args) < 2:
-            printStatus("help", f"Usage: {COMMAND} stage getinternal <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage getinternal <address>", "warning")
             sys.exit(1)
         address = args[1]
-        version = args[2] if len(args) > 2 else "latest"
-        appendStageLine(f"GETINTERNAL|{address}|{version}")
-        printStatus("stage", f"Staged getinternal {address} {version}", "success")
+        appendStageLine(f"GETINTERNAL|{address}")
+        printStatus("stage", f"Staged getinternal {address}", "success")
         return
 
     if subcommand == "rminternal":
         if len(args) < 2:
-            printStatus("help", f"Usage: {COMMAND} stage rminternal <address> [version]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage rminternal <address>", "warning")
             sys.exit(1)
         address = args[1]
-        version = args[2] if len(args) > 2 else "latest"
-        appendStageLine(f"RMINTERNAL|{address}|{version}")
-        printStatus("stage", f"Staged rminternal {address} {version}", "success")
+        appendStageLine(f"RMINTERNAL|{address}")
+        printStatus("stage", f"Staged rminternal {address}", "success")
         return
 
     if subcommand == "getdepinternal":
@@ -875,33 +893,29 @@ async def handleStageCommand(args: list[str]) -> None:
         target_line: str | None = None
         if tag == "GET":
             if len(args) < 3:
-                printStatus("help", f"Usage: {COMMAND} stage cancel get <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel get <address>", "warning")
                 sys.exit(1)
             address: str = args[2]
-            version: str = args[3] if len(args) > 3 else "latest"
-            target_line = f"ADDDEP|{address}|{version}"
+            target_line = f"ADDDEP|{address}"
         elif tag == "GETLIB":
             if len(args) < 4:
-                printStatus("help", f"Usage: {COMMAND} stage cancel getlib <project> <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel getlib <project> <address>", "warning")
                 sys.exit(1)
             project = args[2]
             address = args[3]
-            version = args[4] if len(args) > 4 else "latest"
-            target_line = f"ADDLIB|{project}|{address}|{version}"
+            target_line = f"ADDLIB|{project}|{address}"
         elif tag == "ADDDEP":
             if len(args) < 3:
-                printStatus("help", f"Usage: {COMMAND} stage cancel adddep <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel adddep <address>", "warning")
                 sys.exit(1)
             address = args[2]
-            version = args[3] if len(args) > 3 else "latest"
-            target_line = f"ADDNDEP|{address}|{version}"
+            target_line = f"ADDNDEP|{address}"
         elif tag == "RMDEP":
             if len(args) < 3:
-                printStatus("help", f"Usage: {COMMAND} stage cancel rmdep <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel rmdep <address>", "warning")
                 sys.exit(1)
             address = args[2]
-            version = args[3] if len(args) > 3 else "latest"
-            target_line = f"RMNDEP|{address}|{version}"
+            target_line = f"RMNDEP|{address}"
         elif tag == "GETDEP":
             if len(args) > 3:
                 printStatus("help", f"Usage: {COMMAND} stage cancel getdep [target]", "warning")
@@ -922,19 +936,17 @@ async def handleStageCommand(args: list[str]) -> None:
             target_line = f"UPDLIBS|{target}"
         elif tag == "RM":
             if len(args) < 3:
-                printStatus("help", f"Usage: {COMMAND} stage cancel rm <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel rm <address>", "warning")
                 sys.exit(1)
             address = args[2]
-            version = args[3] if len(args) > 3 else "latest"
-            target_line = f"RMDEP|{address}|{version}"
+            target_line = f"RMDEP|{address}"
         elif tag == "RMLIB":
             if len(args) < 4:
-                printStatus("help", f"Usage: {COMMAND} stage cancel rmlib <project> <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel rmlib <project> <address>", "warning")
                 sys.exit(1)
             project = args[2]
             address = args[3]
-            version = args[4] if len(args) > 4 else "latest"
-            target_line = f"RMLIB|{project}|{address}|{version}"
+            target_line = f"RMLIB|{project}|{address}"
         elif tag == "COMPAT":
             if len(args) < 5:
                 printStatus("help", f"Usage: {COMMAND} stage cancel compat <mode> <target> <custom_phrase>", "warning")
@@ -951,18 +963,16 @@ async def handleStageCommand(args: list[str]) -> None:
             target_line = f"RUNCMD|{command}"
         elif tag == "GETINTERNAL":
             if len(args) < 3:
-                printStatus("help", f"Usage: {COMMAND} stage cancel getinternal <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel getinternal <address>", "warning")
                 sys.exit(1)
             address = args[2]
-            version = args[3] if len(args) > 3 else "latest"
-            target_line = f"GETINTERNAL|{address}|{version}"
+            target_line = f"GETINTERNAL|{address}"
         elif tag == "RMINTERNAL":
             if len(args) < 3:
-                printStatus("help", f"Usage: {COMMAND} stage cancel rminternal <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} stage cancel rminternal <address>", "warning")
                 sys.exit(1)
             address = args[2]
-            version = args[3] if len(args) > 3 else "latest"
-            target_line = f"RMINTERNAL|{address}|{version}"
+            target_line = f"RMINTERNAL|{address}"
         elif tag == "GETDEPINTERNAL":
             if len(args) > 3:
                 printStatus("help", f"Usage: {COMMAND} stage cancel getdepinternal [target]", "warning")
@@ -1032,58 +1042,211 @@ async def reinstallProjectLibraries(project: str) -> None:
     printStatus("done", f"Reinstalled {len(results)} librar{'y' if len(results) == 1 else 'ies'} from {install_root}.", "success")
 
 def installAddress(address: str, reinstall: bool = True) -> InstallResult:
-    return installAddressToRoot(address, "ww", reinstall)
+    return installDistroToRoot(address, os.path.join("", getAddressInfo(address)['author'], getAddressInfo(address)['distro']), reinstall)
 
-
-def installAddressToRoot(address: str, install_root: str = "ww", reinstall: bool = True, work_dir: str = ".") -> InstallResult:
+def installDistroToRoot(address: str, install_root: str = "distrobase", reinstall: bool = True, work_dir: str = ".") -> InstallResult:
+    info = getAddressInfo(address)
     install_root = os.path.abspath(install_root)
     work_dir = os.path.abspath(work_dir)
-
     os.makedirs(install_root, exist_ok=True)
     os.makedirs(work_dir, exist_ok=True)
-
-    if os.path.exists(install_root) and os.listdir(install_root):
-        if not reinstall:
-            return InstallResult(status="error", success=False, message=f"Address is already installed at {install_root}", lines=[f"Address is already installed at {install_root}"], exit_code=1)
-
-        for name in os.listdir(install_root):
-            path = os.path.join(install_root, name)
-            if os.path.isdir(path) and not os.path.islink(path):
-                shutil.rmtree(path)
-            else:
-                os.remove(path)
-
-    temp_dir = tempfile.mkdtemp(prefix="hydrogen-install-", dir=work_dir)
+    if info["type"] == "local":
+        return InstallResult(
+            status="error",
+            success=False,
+            message="Local Distrobase installation is not implemented yet.",
+            lines=["Local Distrobase installation is not implemented yet."],
+            exit_code=1,
+        )
+    registry = info["registry"]
+    if registry.startswith("http://") or registry.startswith("https://"):
+        base_url = registry.rstrip("/")
+    else:
+        base_url = f"https://dstbs.{registry}"
+    if registry.startswith("127.0.0.1") or registry.startswith("localhost"):
+        base_url = f"http://{registry}".rstrip("/")
+    author = info["author"]
+    distro = info["distro"]
+    version = info["version"]
+    temp_dir = tempfile.mkdtemp(
+        prefix="hydrogen-install-",
+        dir=work_dir,
+    )
     try:
-        archive = os.path.join(temp_dir, f"{address}.zip")
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("README.txt", f"Placeholder install for {address}\n")
-        extracted = os.path.join(temp_dir, "extracted")
+        if version == "latest":
+            distribution_url = (
+                f"{base_url}/v1/"
+                f"{author}/{distro}"
+            )
+            with urllib.request.urlopen(
+                distribution_url
+            ) as response:
+                distribution = json.load(response)
+            version = distribution["latest"]
+        release_url = (
+            f"{base_url}/v1/"
+            f"{author}/{distro}/{version}"
+        )
+        with urllib.request.urlopen(
+            release_url
+        ) as response:
+            release = json.load(response)
+        artifacts = release.get("artifacts", [])
+        if not artifacts:
+            raise RuntimeError(
+                f"Release {version} contains no artifacts."
+            )
+        artifact = artifacts[0]
+        artifact_name = artifact["name"]
+        if (
+            os.path.basename(artifact_name)
+            != artifact_name
+        ):
+            raise RuntimeError(
+                f"Invalid artifact name: {artifact_name}"
+            )
+        archive = os.path.join(
+            temp_dir,
+            artifact_name,
+        )
+        artifact_url = (
+            f"{base_url}/v1/"
+            f"{author}/{distro}/{version}/"
+            f"{urllib.parse.quote(artifact_name)}"
+        )
+        with urllib.request.urlopen(
+            artifact_url
+        ) as response:
+            with open(archive, "wb") as file:
+                shutil.copyfileobj(response, file)
+        extracted = os.path.join(
+            temp_dir,
+            "extracted",
+        )
         os.makedirs(extracted, exist_ok=True)
-        with zipfile.ZipFile(archive) as zf:
-            zf.extractall(extracted)
+        if artifact_name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(extracted)
+        elif artifact_name.endswith((
+            ".tar.gz",
+            ".tgz",
+            ".tar",
+        )):
+            with tarfile.open(
+                archive,
+                "r:*",
+            ) as tf:
+
+                tf.extractall(extracted)
+        else:
+            raise RuntimeError(
+                f"Unsupported artifact format: "
+                f"{artifact_name}"
+            )
         entries = os.listdir(extracted)
-        source_root = os.path.join(extracted, entries[0]) if len(entries) == 1 and os.path.isdir(os.path.join(extracted, entries[0])) else extracted
-        for name in os.listdir(source_root):
-            source = os.path.join(source_root, name)
-            destination = os.path.join(install_root, name)
-            shutil.move(source, destination)
-
-        return InstallResult(status="success", success=True, lines=[f"Installed {address} to {install_root}"], message=f"Installed {address} to {install_root}", exit_code=0)
-
-    except Exception as exc:
-        if os.path.exists(install_root):
+        if (
+            len(entries) == 1
+            and os.path.isdir(
+                os.path.join(extracted, entries[0])
+            )
+        ):
+            source_root = os.path.join(
+                extracted,
+                entries[0],
+            )
+        else:
+            source_root = extracted
+        if os.path.exists(install_root) and os.listdir(
+            install_root
+        ):
+            if not reinstall:
+                return InstallResult(
+                    status="error",
+                    success=False,
+                    message=(
+                        f"Address is already installed "
+                        f"at {install_root}"
+                    ),
+                    lines=[
+                        (
+                            f"Address is already installed "
+                            f"at {install_root}"
+                        )
+                    ],
+                    exit_code=1,
+                )
             for name in os.listdir(install_root):
-                path = os.path.join(install_root, name)
-                if os.path.isdir(path) and not os.path.islink(path):
+                path = os.path.join(
+                    install_root,
+                    name,
+                )
+                if (
+                    os.path.isdir(path)
+                    and not os.path.islink(path)
+                ):
                     shutil.rmtree(path)
                 else:
                     os.remove(path)
-        return InstallResult(status="error", success=False, lines=[f"Failed to install {address}: {exc}"], message=f"Failed to install {address}: {exc}", exit_code=1)
-
+        for name in os.listdir(source_root):
+            source = os.path.join(
+                source_root,
+                name,
+            )
+            destination = os.path.join(
+                install_root,
+                name,
+            )
+            shutil.move(
+                source,
+                destination,
+            )
+        return InstallResult(
+            status="success",
+            success=True,
+            lines=[
+                (
+                    f"Installed {address} "
+                    f"release {version} "
+                    f"to {install_root}"
+                )
+            ],
+            message=(
+                f"Installed {address} "
+                f"release {version} "
+                f"to {install_root}"
+            ),
+            exit_code=0,
+        )
+    except Exception as exc:
+        if os.path.exists(install_root):
+            for name in os.listdir(install_root):
+                path = os.path.join(
+                    install_root,
+                    name,
+                )
+                if (
+                    os.path.isdir(path)
+                    and not os.path.islink(path)
+                ):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+        return InstallResult(
+            status="error",
+            success=False,
+            lines=[
+                f"Failed to install {address}: {exc}"
+            ],
+            message=(
+                f"Failed to install {address}: {exc}"
+            ),
+            exit_code=1,
+        )
     finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
+        shutil.rmtree(
+            temp_dir,
+            ignore_errors=True,
+        )
 
 def queueInstall(address: str, reinstall: bool = True, install_root: str = "ww", work_dir: str = ".") -> asyncio.Task:
     return queueInstallToRoot(address, install_root, reinstall, work_dir)
@@ -1345,28 +1508,26 @@ async def main() -> None:
     match sys.argv[1]:
         case "get":
             if len(sys.argv) == 2:
-                printStatus("help", f"Usage: {COMMAND} get <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} get <address>", "warning")
                 sys.exit(1)
             address: str = sys.argv[2]
-            version: str = sys.argv[3] if len(sys.argv) > 3 else "latest"
-            result: InstallResult = await installAsync(address, version)
+            result: InstallResult = await installAsync(address)
             if not result.exit_code:
-                await installSubdependencies(address, version)
+                await installSubdependencies(address)
         case "getlib":
             if len(sys.argv) < 4:
-                printStatus("help", f"Usage: {COMMAND} getlib <project> <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} getlib <project> <address>", "warning")
                 sys.exit(1)
             project: str = sys.argv[2]
             address = sys.argv[3]
-            version = sys.argv[4] if len(sys.argv) > 4 else "latest"
             install_root: str = os.path.join(project, "libraries", "ww")
-            result = await queueInstallToRoot(address, version, install_root, True)
+            result = await queueInstallToRoot(address, install_root, True)
             printInstallResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         case "rm":
             if len(sys.argv) == 2:
-                printStatus("help", f"Usage: {COMMAND} rm <address> [version]", "warning")
+                printStatus("help", f"Usage: {COMMAND} rm <address>", "warning")
                 sys.exit(1)
             pub: str = sys.argv[2]
             printStatus("rm", f"Deleting {pub}", "info")
@@ -1376,19 +1537,11 @@ async def main() -> None:
                 else:
                     printStatus("info", "No address installed.", "muted")
             else:
-                if len(sys.argv) > 3:
-                    rel: str = sys.argv[3]
-                    deleted: int = removeAddressVersions("ww", pub, rel)
-                    if deleted:
-                        printStatus("done", "Operation complete.", "success")
-                    else:
-                        printStatus("miss", f"Version '{rel}' of address '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
+                deleted: int = removeAddressVersions("ww", pub)
+                if deleted:
+                    printStatus("done", "Operation complete.", "success")
                 else:
-                    deleted: int = removeAddressVersions("ww", pub)
-                    if deleted:
-                        printStatus("done", "Operation complete.", "success")
-                    else:
-                        printStatus("miss", f"Address '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
+                    printStatus("miss", f"Address '{pub.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
         case "getdep":
             path: str = sys.argv[2] if len(sys.argv) > 2 else "."
             await getDepEverywhere(path)
@@ -1441,16 +1594,15 @@ async def main() -> None:
             printStatus("done", f"Updated {compat_total_lines} line{'s' if compat_total_lines != 1 else ''} across {compat_total_files} file{'s' if compat_total_files != 1 else ''}.", "success")
         case "getinternal":
             if len(sys.argv) == 2:
-                printStatus("help", f"Usage: {NAME} getinternal <address> [version]", "warning")
+                printStatus("help", f"Usage: {NAME} getinternal <address>", "warning")
                 sys.exit(1)
             address = sys.argv[2]
-            version = sys.argv[3] if len(sys.argv) > 3 else "latest"
-            result = await installAsync(address, version, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
+            result = await installAsync(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
             if not result.exit_code:
-                await installSubdependencies(address, version, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
+                await installSubdependencies(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
         case "rminternal":
             if len(sys.argv) == 2:
-                printStatus("help", f"Usage: {NAME} rminternal <address> [version]", "warning")
+                printStatus("help", f"Usage: {NAME} rminternal <address>", "warning")
                 sys.exit(1)
             dist = sys.argv[2]
             printStatus("rm", f"Deleting {dist}", "info")
@@ -1467,19 +1619,11 @@ async def main() -> None:
                 else:
                     printStatus("info", "No address installed.", "muted")
             else:
-                if len(sys.argv) > 3:
-                    rel = sys.argv[3]
-                    deleted = removeAddressVersions(INTERNAL_WW_DIR, dist, rel)
-                    if deleted:
-                        printStatus("done", "Operation complete.", "success")
-                    else:
-                        printStatus("miss", f"Version '{rel}' of address '{dist.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
+                deleted = removeAddressVersions(INTERNAL_WW_DIR, dist)
+                if deleted:
+                    printStatus("done", "Operation complete.", "success")
                 else:
-                    deleted = removeAddressVersions(INTERNAL_WW_DIR, dist)
-                    if deleted:
-                        printStatus("done", "Operation complete.", "success")
-                    else:
-                        printStatus("miss", f"Address '{dist.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
+                    printStatus("miss", f"Address '{dist.capitalize()}' is not installed here. Are you sure you spelled it right?", "warning")
         case "getdepinternal":
             path = sys.argv[2] if len(sys.argv) > 2 else "."
             await getDepEverywhere(path, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
