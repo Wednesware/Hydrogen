@@ -1,4 +1,4 @@
-import sys, zipfile, shutil, os, json, subprocess, traceback, tarfile, asyncio, re, tempfile, platform, urllib
+import sys, zipfile, shutil, os, json, subprocess, traceback, tarfile, asyncio, re, tempfile, platform, urllib, socket, inspect, urllib.request, urllib.error, logging
 from dataclasses import dataclass, field
 from urllib.request import urlretrieve
 
@@ -9,7 +9,7 @@ from .ww.mg26_11.filepath import FilePath
 SOURCEGEN_VERSION: str = "26.5" # SHOULD NOT BE CHANGED
 
 NAME: str = "Hydrogen" # TODO
-DESCRIPTION: str = "Official and community-made distribution installer." # TODO
+DESCRIPTION: str = "Sourcegen-based Distrobase installer." # TODO
 VERSION: str = "26.1" # TODO
 COMMAND: str = f"h2" # TODO
 
@@ -25,17 +25,25 @@ EXTENSIONS_DIR: str = os.path.join(os.path.dirname(__file__), "extensions")
 TRUSTED_EXTENSIONS_FILE: str = os.path.join(os.path.dirname(__file__), ".TRUSTED_EXTENSIONS")
 LEN_PATH: str = os.path.join(os.path.dirname(__file__), "ww", "len")
 HYDROSTAGED_FILE: str = ".hydrostaged"
-# "internal" installs live inside the hydrogen package itself (not the cwd), so commands like
 INTERNAL_WW_DIR: str = os.path.join(os.path.dirname(__file__), "ww")
 INTERNAL_TEMP_DIR: str = os.path.join(INTERNAL_WW_DIR, "temp")
 CONFIG_PATH: FilePath = FilePath(__file__) / ".." / "config.pyon"
+DISTRO_NOT_FOUND_TEXT: str = "Distribution not found"
 DSTBS_DIR: str = {
-    "linux": "/var/lib/dstbs",
-    "windows": "C:\\ProgramData\\Distrobase\\dstbs",
-    "darwin": "/Library/Application Support/Distrobase/dstbs"
+    "linux": "/var/lib",
+    "windows": "C:\\ProgramData\\Distrobase",
+    "darwin": "/Library/Application Support/Distrobase"
 }[platform.system().lower()]
 
 running_installs: dict[tuple[str, str], asyncio.Task] = {}
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+class InvalidDistributionNameError(ValueError):
+    """Raised when an address contains an invalid distribution name."""
+
+class InvalidVersionError(ValueError):
+    """Raised when an address contains an invalid release version."""
 
 def getAddressInfo(address: str) -> dict:
     address = address.strip()
@@ -45,28 +53,36 @@ def getAddressInfo(address: str) -> dict:
     addr_type: str = "registry" if "@" in address else ("local" if "#" in address else "")
     if not addr_type:
         addr_type = "local" if home_registry.startswith("#") else "registry"
-    parts: list[str] = address.split("@", maxsplit=1) if addr_type == "registry" else address.split("#", maxsplit=1)
+    separator: str = "@" if addr_type == "registry" else "#"
+    parts: list[str] = address.split(separator, maxsplit=1)
     if len(parts) == 1:
-        parts.append(home_registry.removeprefix("#"))
-    author: str = parts[0].split(".")[0] if "." in parts[0] else ""
-    if not author:
-        author = parts[1].split(".")[0].split(":")[0] if addr_type == "registry" else "localhost"
-    distro: str = parts[0].split(".", maxsplit=1)[-1]
-    version: str = parts[1].split("=", maxsplit=1)[1] if "=" in parts[1] else "latest"
-    parts[1] = parts[1].split("=", maxsplit=1)[0]
-    if addr_type == "local" and not parts[1]:
-        parts[1] = DSTBS_DIR
+        parts.append(home_registry.removeprefix("#") if addr_type == "local" else home_registry)
+    package_name: str = parts[0].strip()
+    registry: str = parts[1].strip()
+    version: str = "latest"
+    if "=" in registry:
+        registry, version = registry.split("=", maxsplit=1)
+    elif "=" in package_name:
+        package_name, version = package_name.split("=", maxsplit=1)
+    package_parts: list[str] = package_name.split(".", maxsplit=1)
+    if len(package_parts) == 2:
+        author, distro = package_parts
+    else:
+        distro = package_parts[0]
+        author = registry.split(".")[0].split(":")[0] if addr_type == "registry" else "localhost"
+    if addr_type == "local" and not registry:
+        registry = DSTBS_DIR
     return {
         "address": address,
-        "author": author,
-        "distro": distro,
-        "registry": parts[1],
+        "author": author.lower(),
+        "distro": distro.lower(),
+        "registry": registry if addr_type == "local" else registry.lower(),
         "version": version,
         "type": addr_type
     }
 
 @dataclass(slots=True)
-class InstallResult:
+class Result:
     status: str = "info"
     lines: list[str] = field(default_factory=list)
     exit_code: int = 0
@@ -102,38 +118,29 @@ def printHelp() -> None:
     print(f"  {COMMAND} <command> [args]")
     print()
     printSection("General")
-    printCommand("get <address>", "Download a distribution from a Wednesware address.")
+    printCommand("get <address>", "Download a distribution from an address.")
     printCommand("view <address>", "View information about a distribution.")
-    printCommand("getlib <project> <address>", "Download a distribution into '<project>/libraries/ww'.")
+    printCommand("url <address>", "Get the URL of a tar.gz artifact via an address.")
+    printCommand("getlib <project> <address>", "Download a distribution into '<project>/libraries/author'.")
+    printCommand("publish <project> <address>", "Publish a distribution from a project directory to a registry.")
     printCommand("rm <address>", "Delete one distribution or all installed distributions.")
     printCommand("getdep [path]", "Install missing dependencies from a .hydrodep file, including nested ones.")
     printCommand("forcegetdep [path]", "Install all dependencies, regardless of whether they are already installed from a .hydrodep file, including nested ones, forcing reinstallation of all dependencies.")
     printCommand("updlibs <project>", "Reinstall all distributions in '<project>/libraries' from their exact installed addresses.")
     printCommand("registry <registry>", "Set your home registry which will be used in operations when a registry is not specified.")
     print()
-    printSection("Compatibility")
-    printCommand("compat <mode> <address|directory> [custom-phrase]", "Rewrite Wednesware imports in a directory to match the specified compatibility mode.")
-    printCommand("compat abs <address|directory>", "Use 'abs' for packages found in '.'. ")
-    printCommand("compat rel <address|directory>", "Use 'rel' for packages found in '<project>'.")
-    printCommand("compat rel-up1 <address|directory>", "Use 'rel-up1' for packages found in '<project>/../'.")
-    printCommand("compat rel-up2 <address|directory>", "Use 'rel-up2' for packages found in '<project>/../../'.")
-    printCommand("compat rel-up3 <address|directory>", "Use 'rel-up3' for packages found in '<project>/../../../'.")
-    printCommand("compat abs-ww <address|directory>", "Use 'abs-ww' for packages found in './ww'. Default compat mode.")
-    printCommand("compat rel-ww <address|directory>", "Use 'rel-ww' for packages found in '<project>/ww' with relative imports.")
-    printCommand("compat rel-libs-ww <address|directory>", "Use 'rel-libs-ww' for Helium projects or packages found in '<project>/libraries/ww' with relative imports.")
-    printCommand("compat custom <address|directory> <custom-phrase>", "Use 'custom' to specify a custom phrase for the import prefix.")
-    print()
     printSection("Stage")
     printCommand("stage get <address>", "Stage a dependency install into ./ww.")
-    printCommand("stage getlib <project> <address>", "Stage a library install into ./<project>/libraries/ww.")
+    printCommand("stage getlib <project> <address>", "Stage a library install into ./<project>/libraries/author.")
     printCommand("stage adddep <address>", "Stage adding one dependency line to ./.hydrodep.")
     printCommand("stage rmdep <address>", "Stage removing one dependency line from ./.hydrodep.")
     printCommand("stage getdep [target]", "Stage running getdep at ./<target>.")
     printCommand("stage forcegetdep [target]", "Stage running forcegetdep at ./<target>.")
     printCommand("stage updlibs [target]", "Stage running updlibs at ./<target>.")
     printCommand("stage rm <address>", "Stage dependency removal from ./ww.")
-    printCommand("stage rmlib <project> <address>", "Stage library removal from ./<project>/libraries/ww.")
-    printCommand("stage compat <mode> <address|directory> [custom-phrase]", "Stage compatibility rewrite for Wednesware imports in a directory.")
+    printCommand("stage rmlib <project> <address>", "Stage library removal from ./<project>/libraries/author.")
+    printCommand("stage publish <project> <address>", "Stage publishing a project distribution to a registry.")
+    printCommand("stage registry <registry>", "Stage setting the home registry.")
     printCommand("stage cmd <command>", "Stage a shell command to run during stage execute/commit.")
     printCommand("stage getinternal <address>", "Stage a dependency install into hydrogen/ww.")
     printCommand("stage rminternal <address>", "Stage dependency removal from hydrogen/ww.")
@@ -187,7 +194,7 @@ def printExtensionCommands() -> None:
     if not printed:
         print(f"  {cli('(none installed)', CLI_DIM)}")
 
-def addressDirname(address: str, root: str = "ww") -> str:
+def addressDirname(address: str, root: str = "distrobase") -> str:
     return os.path.join(root, address)
 
 def dependencyFilePath(path: str) -> str:
@@ -195,7 +202,7 @@ def dependencyFilePath(path: str) -> str:
         return path
     return os.path.join(path, ".hydrodep")
 
-def printInstallResult(result: InstallResult, color: bool = True) -> None:
+def printResult(result: Result, color: bool = True) -> None:
     labels: dict[str, str] = {
         "info": "skip",
         "success": "done",
@@ -214,6 +221,14 @@ def printInstallResult(result: InstallResult, color: bool = True) -> None:
             print(f"{cli(f'[{label}]', prefix, bold=True)} {line}")
         else:
             print(f"[{label}] {line}")
+
+def printDistroLocationError(address: str, exc: Exception) -> None:
+    """Print a friendly CLI error and retain diagnostics in the debug log."""
+    logger.debug("Could not locate distribution %r.", address, exc_info=exc)
+    message: str = " ".join(
+        line.strip() for line in str(exc).splitlines() if line.strip()
+    ) or f"Could not locate distribution '{address}'."
+    printStatus("fail", message, "error")
 
 def stageFilePath() -> str:
     return os.path.join(".", HYDROSTAGED_FILE)
@@ -308,7 +323,8 @@ def stageTagForCommand(command: str) -> str | None:
         "getdep": "GETDEP",
         "forcegetdep": "FORCEGETDEP",
         "updlibs": "UPDLIBS",
-        "compat": "COMPAT",
+        "publish": "PUBLISH",
+        "registry": "REGISTRY",
         "rm": "RM",
         "rmlib": "RMLIB",
         "cmd": "RUNCMD",
@@ -316,131 +332,6 @@ def stageTagForCommand(command: str) -> str | None:
         "rminternal": "RMINTERNAL",
         "getdepinternal": "GETDEPINTERNAL",
     }.get(command.lower())
-
-
-COMPAT_TAG: str = "#COMPAT"
-COMPAT_BUILTIN_PREFIXES: dict[str, str] = {
-    "abs-ww": "ww",
-    "abs": "",
-    "rel": "",
-    "rel-up1": ".",
-    "rel-up2": "..",
-    "rel-up3": "...",
-    "rel-ww": ".ww",
-    "rel-libs-ww": ".libraries.ww",
-}
-COMPAT_TAG: str = "#COMPAT"
-# Each compat mode is pure data: a prefix plus a join strategy, so adding a new mode never
-# requires touching the transform logic below - just add an entry here.
-#   "dot"      -> collapse the boundary between a trailing "." on the prefix and the sub-path's
-#                 leading "." into a single "." (namespace-style prefixes, e.g. "ww.", ".ww.")
-#   "raw"      -> concatenate prefix and sub-path verbatim, no collapsing (every "." is
-#                 meaningful, e.g. "up N levels" relative prefixes)
-#   "strip"    -> drop the sub-path's own leading "." entirely (plain absolute imports)
-#   "identity" -> the sub-path is already in canonical form; only the empty-path fallback is used
-COMPAT_MODES: dict[str, tuple[str, str]] = {
-    "abs-ww": ("ww.", "dot"),
-    "abs": ("", "strip"),
-    "rel": (".", "identity"),
-    "rel-up1": ("..", "raw"),
-    "rel-up2": ("...", "raw"),
-    "rel-up3": ("....", "raw"),
-    "rel-ww": (".ww.", "dot"),
-    "rel-libs-ww": (".libraries.ww.", "dot"),
-}
-_COMPAT_LINE_RE = re.compile(r'^(\s*)from\s+(?:\.?(?:libraries\.)?)ww(\.[^\s]*|)(\s+import\s+.*)$')
-_COMPAT_TAGGED_LINE_RE = re.compile(r'^(\s*)from\s+(\S+)(\s+import\s+.*)$')
-
-def compatNewPath(mode: str, custom_phrase: str, rest: str) -> str | None:
-    if mode == "custom":
-        return custom_phrase + rest
-    if mode == "abs":
-        # absolute import with no leading dot, so drop the leading dot ww left on the sub-path
-        sub: str = rest[1:] if rest.startswith(".") else rest
-        return sub or None
-    if mode in ("rel", "rel-up1", "rel-up2", "rel-up3"):
-        # rest already carries its own leading dot (or is empty), so the prefix here holds only
-        # the *extra* up-level dots; pad with a bare "." when rest is empty to keep dot counts consistent
-        prefix: str = COMPAT_BUILTIN_PREFIXES[mode]
-        return prefix + rest if rest else prefix + "."
-    return COMPAT_BUILTIN_PREFIXES[mode] + rest
-
-def compatRestFromTaggedPath(path: str, custom_phrase: str) -> str:
-    # recover the canonical (dot-prefixed) sub-path after "ww" from a path already rewritten by any builtin/custom mode
-    for prefix in (".libraries.ww", ".ww", "ww"):
-        if path.startswith(prefix):
-            return path[len(prefix):]
-    if custom_phrase and path.startswith(custom_phrase):
-        return path[len(custom_phrase):]
-    stripped: str = path.lstrip(".")
-    if path and stripped != path:
-        # path was purely dots (rel/rel-upN result), so re-normalize to a single leading dot (or none)
-        # instead of keeping every up-level dot, which would compound on repeated transforms
-        return "." + stripped if stripped else ""
-    if path in ("", "."):
-        return ""
-    return path if path.startswith(".") else "." + path
-
-def compatTransformLine(line: str, mode: str, custom_phrase: str) -> str | None:
-    ending: str = "\n" if line.endswith("\n") else ""
-    body: str = line[:-1] if ending else line
-    stripped: str = body.strip()
-    is_tagged: bool = stripped.endswith(COMPAT_TAG)
-    if not (stripped.startswith("from ww") or is_tagged):
-        return None
-    working: str = body
-    if working.rstrip().endswith(COMPAT_TAG):
-        tag_index: int = working.rstrip().rfind(COMPAT_TAG)
-        working = working[:tag_index].rstrip()
-
-    if is_tagged:
-        tagged_match: re.Match | None = _COMPAT_TAGGED_LINE_RE.match(working)
-        if tagged_match is None:
-            return None
-        leading_ws, path, import_clause = tagged_match.group(1), tagged_match.group(2), tagged_match.group(3)
-        rest: str = compatRestFromTaggedPath(path, custom_phrase)
-    else:
-        match: re.Match | None = _COMPAT_LINE_RE.match(working)
-        if match is None:
-            return None
-        leading_ws, rest, import_clause = match.group(1), match.group(2), match.group(3)
-
-    new_path: str | None = compatNewPath(mode, custom_phrase, rest)
-    if new_path is None:
-        return None
-    new_body: str = f"from {leading_ws}{new_path}{import_clause}  {COMPAT_TAG}"
-    if new_body == body:
-        return None
-    return new_body + ending
-
-def iterPythonFiles(root: str):
-    if os.path.isfile(root):
-        if root.endswith(".py"):
-            yield root
-        return
-    for dirpath, _dirnames, filenames in os.walk(root):
-        for filename in filenames:
-            if filename.endswith(".py"):
-                yield os.path.join(dirpath, filename)
-
-def applyCompat(directory: str, mode: str, custom_phrase: str) -> tuple[int, int]:
-    files_changed: int = 0
-    lines_changed: int = 0
-    for path in iterPythonFiles(directory):
-        with open(path) as file:
-            lines: list[str] = file.readlines()
-        changed: bool = False
-        for i, line in enumerate(lines):
-            new_line: str | None = compatTransformLine(line, mode, custom_phrase)
-            if new_line is not None:
-                lines[i] = new_line
-                changed = True
-                lines_changed += 1
-        if changed:
-            with open(path, "w") as file:
-                file.writelines(lines)
-            files_changed += 1
-    return files_changed, lines_changed
 
 
 def removeAddressVersions(install_root: str, address: str) -> int:
@@ -462,12 +353,366 @@ def removeAddressVersions(install_root: str, address: str) -> int:
 
     return deleted
 
-
 def parseInstalledAddressDir(dirname: str) -> tuple[str, str] | None:
     directory_name: str = dirname.lower()
     if not directory_name:
         return None
     return directory_name, "latest"
+
+def localRegistryPath(registry: str) -> str:
+    path: str = os.path.expanduser(registry)
+    if not os.path.isabs(path):
+        path = os.path.abspath(os.path.join(os.getcwd(), path))
+    return os.path.join(path, "dstbs")
+
+def safeExtractZip(archive: str, destination: str) -> None:
+    destination_abs: str = os.path.abspath(destination)
+    with zipfile.ZipFile(archive) as archive_file:
+        for member in archive_file.infolist():
+            target: str = os.path.abspath(os.path.join(destination, member.filename))
+            if os.path.commonpath((destination_abs, target)) != destination_abs:
+                raise RuntimeError(f"Unsafe archive member: {member.filename}")
+        archive_file.extractall(destination)
+
+def safeExtractTar(archive: str, destination: str) -> None:
+    destination_abs: str = os.path.abspath(destination)
+    with tarfile.open(archive, "r:*") as archive_file:
+        for member in archive_file.getmembers():
+            target: str = os.path.abspath(os.path.join(destination, member.name))
+            if os.path.commonpath((destination_abs, target)) != destination_abs:
+                raise RuntimeError(f"Unsafe archive member: {member.name}")
+            if member.issym() or member.islnk():
+                raise RuntimeError(f"Links are not allowed in archives: {member.name}")
+        archive_file.extractall(destination)
+
+def findLocalRelease(local_root: str, author: str, distro: str, version: str) -> tuple[str, str]:
+    candidates: list[str] = []
+    if version != "latest":
+        candidates.extend([
+            os.path.join(local_root, author, distro, version),
+            os.path.join(local_root, author, distro, f"{version}.zip"),
+            os.path.join(local_root, author, distro, f"{version}.tar"),
+            os.path.join(local_root, author, distro, f"{version}.tar.gz"),
+            os.path.join(local_root, author, distro, f"{version}.tgz"),
+            os.path.join(local_root, f"{author}.{distro}", version),
+        ])
+    if version == "latest":
+        candidates.extend([
+            os.path.join(local_root, author, distro),
+            os.path.join(local_root, f"{author}.{distro}"),
+        ])
+    for candidate in candidates:
+        if not os.path.exists(candidate):
+            continue
+        if version == "latest" and os.path.isdir(candidate):
+            versions: list[str] = sorted(
+                item for item in os.listdir(candidate)
+                if os.path.isdir(os.path.join(candidate, item))
+                or item.endswith((".zip", ".tar", ".tar.gz", ".tgz"))
+            )
+            if versions:
+                selected: str = versions[-1]
+                resolved: str = selected
+                for suffix in (".tar.gz", ".tgz", ".zip", ".tar"):
+                    resolved = resolved.removesuffix(suffix)
+                return os.path.join(candidate, selected), resolved
+        return candidate, version
+    raise FileNotFoundError(
+        f"Local distribution '{author}.{distro}={version}' was not found in '{local_root}'."
+    )
+
+def installLocalDistro(address: str, info: dict, install_root: str, reinstall: bool, work_dir: str) -> Result:
+    local_root: str = localRegistryPath(info["registry"])
+    source_path, resolved_version = findLocalRelease(
+        local_root, info["author"], info["distro"], info["version"]
+    )
+    temporary_extract: str | None = None
+    try:
+        if os.path.isdir(source_path):
+            source_root: str = source_path
+        else:
+            temporary_extract = tempfile.mkdtemp(prefix="hydrogen-local-", dir=work_dir)
+            if source_path.endswith(".zip"):
+                safeExtractZip(source_path, temporary_extract)
+            elif source_path.endswith((".tar", ".tar.gz", ".tgz")):
+                safeExtractTar(source_path, temporary_extract)
+            else:
+                raise RuntimeError(f"Unsupported local artifact: {source_path}")
+            entries: list[str] = os.listdir(temporary_extract)
+            source_root = (
+                os.path.join(temporary_extract, entries[0])
+                if len(entries) == 1 and os.path.isdir(os.path.join(temporary_extract, entries[0]))
+                else temporary_extract
+            )
+
+        if os.path.exists(install_root) and os.listdir(install_root) and not reinstall:
+            return Result(
+                status="error",
+                lines=[f"Distro is already installed at {install_root}"],
+                message=f"Distro is already installed at {install_root}",
+                exit_code=1,
+            )
+
+        parent: str = os.path.dirname(os.path.abspath(install_root))
+        os.makedirs(parent, exist_ok=True)
+        staged_root: str = tempfile.mkdtemp(prefix=".hydrogen-install-", dir=parent)
+        try:
+            for name in os.listdir(source_root):
+                source: str = os.path.join(source_root, name)
+                destination: str = os.path.join(staged_root, name)
+                if os.path.isdir(source):
+                    shutil.copytree(source, destination, symlinks=True)
+                else:
+                    shutil.copy2(source, destination)
+            if os.path.exists(install_root):
+                shutil.rmtree(install_root)
+            os.replace(staged_root, install_root)
+        except Exception:
+            shutil.rmtree(staged_root, ignore_errors=True)
+            raise
+
+        return Result(
+            status="success",
+            success=True,
+            lines=[f"Installed {address} release {resolved_version} to {install_root}"],
+            message=f"Installed {address} release {resolved_version} to {install_root}",
+            exit_code=0,
+        )
+    finally:
+        if temporary_extract:
+            shutil.rmtree(temporary_extract, ignore_errors=True)
+
+
+def registryBaseUrl(registry: str) -> str:
+    """Build the API base URL for a registry address."""
+    normalized: str = registry.strip()
+    if normalized.startswith(("http://", "https://")):
+        return normalized.rstrip("/")
+    if normalized.startswith(("127.0.0.1", "localhost")):
+        return f"http://{normalized}".rstrip("/")
+    return f"https://dstbs.{normalized}".rstrip("/")
+
+
+def registryNetworkError(address: str, registry: str, exc: Exception) -> Result:
+    error_text: str = str(exc)
+    reason = getattr(exc, "reason", None)
+    reason_text = str(reason or exc).lower()
+    if isinstance(reason, socket.gaierror) or any(
+        token in reason_text
+        for token in (
+            "name or service not known",
+            "temporary failure in name resolution",
+            "no address associated with hostname",
+            "nodename nor servname provided",
+        )
+    ):
+        message: str = (
+            f"Registry '{registryBaseUrl(registry)}' could not be resolved. "
+            f"Check DNS, internet access, or configure another registry with "
+            f"'{COMMAND} registry <registry>'."
+        )
+    elif "not found" in reason_text:
+        address_info: dict = getAddressInfo(address)
+        message = f"Distribution '{address_info['author']}.{address_info['distro']}' was not found in registry '{address_info['registry']}'."
+    else:
+        message = f"Failed to contact registry '{registryBaseUrl(registry)}': {error_text}"
+    return Result(
+        status="error",
+        success=False,
+        lines=[f"Failed to install {address}: {message}"],
+        message=message,
+        exit_code=1,
+    )
+
+def findDistroLocation(address: str) -> str:
+    info: dict = getAddressInfo(address)
+    author: str = info["author"]
+    distro: str = info["distro"]
+    version: str = info["version"]
+
+    name_pattern: str = r"[a-z0-9][a-z0-9_-]*"
+    invalid_names: list[str] = [
+        name for name in (author, distro)
+        if not re.fullmatch(name_pattern, name)
+    ]
+    if invalid_names:
+        raise InvalidDistributionNameError(
+            f"Invalid distribution name '{author}.{distro}'."
+        )
+
+    if (
+        not version
+        or version != "latest"
+        and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", version)
+    ):
+        raise InvalidVersionError(
+            f"Invalid version '{version}'. Use 'latest' or a version containing only letters, numbers, '.', '_' and '-'."
+        )
+
+    display_name: str = f"{author}.{distro}={version}"
+
+    if info["type"] == "local":
+        local_root: str = localRegistryPath(info["registry"])
+        try:
+            source_path, resolved_version = findLocalRelease(
+                local_root, author, distro, version
+            )
+        except FileNotFoundError as exc:
+            distribution_paths: list[str] = [
+                os.path.join(local_root, author, distro),
+                os.path.join(local_root, f"{author}.{distro}"),
+            ]
+            if not any(os.path.exists(path) for path in distribution_paths):
+                raise FileNotFoundError(
+                    f"Could not find distribution '{author}.{distro}#'."
+                ) from exc
+            if version != "latest":
+                raise FileNotFoundError(
+                    f"Could not find version '{version}' of distribution '{author}.{distro}#'."
+                ) from exc
+            raise FileNotFoundError(
+                f"Distribution: {display_name}\n"
+                f"Registry: {local_root}\n"
+                "Reason: no matching release was found."
+            ) from exc
+        if os.path.isdir(source_path):
+            raise FileNotFoundError(
+                f"Distribution: {author}.{distro}={resolved_version}\n"
+                f"Found: {source_path}\n"
+                "Reason: a release archive is required.\n"
+                "Expected: .tar.gz or .tgz"
+            )
+        if not source_path.endswith((".tar.gz", ".tgz")):
+            raise FileNotFoundError(
+                f"Distribution: {author}.{distro}={resolved_version}\n"
+                f"Found: {source_path}\n"
+                "Reason: the release format is unsupported.\n"
+                "Expected: .tar.gz or .tgz"
+            )
+        return os.path.abspath(source_path)
+
+    base_url: str = registryBaseUrl(info["registry"])
+    distribution_url: str = (
+        f"{base_url}/v1/{urllib.parse.quote(author)}/"
+        f"{urllib.parse.quote(distro)}"
+    )
+    lookup_stage: str = "distribution"
+    try:
+        with urllib.request.urlopen(distribution_url) as response:
+            distribution: dict = json.load(response)
+        resolved_version = version if version != "latest" else distribution["latest"]
+        release_url: str = f"{distribution_url}/{urllib.parse.quote(resolved_version)}"
+        lookup_stage = "release"
+        with urllib.request.urlopen(release_url) as response:
+            release: dict = json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            if lookup_stage == "release":
+                raise FileNotFoundError(
+                    f"Version '{resolved_version}' was not found for distribution '{author}.{distro}'."
+                ) from exc
+            raise FileNotFoundError(
+                f"Distribution '{author}.{distro}' was not found in registry '{info['registry']}'."
+            ) from exc
+        raise RuntimeError(
+            f"Registry '{info['registry']}' returned HTTP {exc.code} while looking up '{display_name}'."
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Could not contact registry '{registryBaseUrl(info['registry'])}' while looking up '{display_name}': {exc.reason}"
+        ) from exc
+    artifacts: list = release.get("artifacts", [])
+    for artifact in artifacts:
+        artifact_name: str = artifact.get("name", "")
+        if artifact_name.endswith((".tar.gz", ".tgz")):
+            return f"{release_url}/{urllib.parse.quote(artifact_name)}"
+    raise FileNotFoundError(
+        f"Could not find an archive for '{author}.{distro}={resolved_version}' in registry '{info['registry']}'.\n"
+        "  Expected: a .tar.gz or .tgz artifact"
+    )
+
+
+def viewDistro(address: str) -> Result:
+    info = getAddressInfo(address)
+    author = info["author"]
+    distro = info["distro"]
+    version = info["version"]
+
+    try:
+        if info["type"] == "local":
+            source_path, resolved_version = findLocalRelease(
+                localRegistryPath(info["registry"]), author, distro, version
+            )
+            artifact_name = "<directory>" if os.path.isdir(source_path) else os.path.basename(source_path)
+            artifact_size = "directory" if os.path.isdir(source_path) else f"{os.path.getsize(source_path)} bytes"
+            lines = [
+                f"Distribution: {author}.{distro}",
+                f"Release: {resolved_version}",
+                f"Registry: {info['registry']}",
+                f"Artifact: {artifact_name}",
+                f"Size: {artifact_size}",
+            ]
+        else:
+            base_url = registryBaseUrl(info["registry"])
+            distribution_url = (
+                f"{base_url}/v1/{urllib.parse.quote(author)}/"
+                f"{urllib.parse.quote(distro)}"
+            )
+            with urllib.request.urlopen(distribution_url) as response:
+                distribution = json.load(response)
+            resolved_version = version if version != "latest" else distribution["latest"]
+            release_url = f"{distribution_url}/{urllib.parse.quote(resolved_version)}"
+            with urllib.request.urlopen(release_url) as response:
+                release = json.load(response)
+            artifacts = release.get("artifacts", [])
+            lines = [
+                f"Distribution: {release.get('author', author)}.{release.get('distribution', distro)}",
+                f"Release: {release.get('release', resolved_version)}",
+                f"Registry: {info['registry']}",
+                f"Artifacts: {len(artifacts)}",
+            ]
+            for artifact in artifacts:
+                lines.extend([
+                    f"Artifact: {artifact.get('name', '<unnamed>')}",
+                    f"Size: {artifact.get('size', 0)} bytes",
+                    f"SHA-256: {artifact.get('sha256', '')}",
+                ])
+
+        return Result(
+            status="success",
+            success=True,
+            lines=lines,
+            message=f"Viewed {author}.{distro} release {resolved_version}",
+            exit_code=0,
+        )
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = str(exc)
+        if DISTRO_NOT_FOUND_TEXT in detail:
+            message = f"Distribution '{author}.{distro}' was not found in registry '{info['registry']}'."
+        else:
+            message = f"Registry returned HTTP {exc.code}: {detail}"
+        return Result(
+            status="error",
+            success=False,
+            lines=[message],
+            message=message,
+            exit_code=1,
+        )
+    except urllib.error.URLError as exc:
+        network_error = registryNetworkError(address, info["registry"], exc)
+        return Result(
+            status="error",
+            success=False,
+            lines=[f"Failed to view {address}: {network_error.message}"],
+            message=network_error.message,
+            exit_code=1,
+        )
+    except Exception as exc:
+        message = f"Failed to view {address}: {exc}"
+        return Result(status="error", success=False, lines=[message], message=message, exit_code=1)
 
 
 @dataclass(slots=True)
@@ -493,9 +738,10 @@ def parseStageLine(line: str) -> StageAction | None:
         "GETDEP": 1,
         "FORCEGETDEP": 1,
         "UPDLIBS": 1,
+        "PUBLISH": 2,
+        "REGISTRY": 1,
         "RMDEP": 1,
         "RMLIB": 2,
-        "COMPAT": 3,
         "GETINTERNAL": 1,
         "RMINTERNAL": 1,
         "GETDEPINTERNAL": 1,
@@ -507,6 +753,17 @@ def parseStageLine(line: str) -> StageAction | None:
     return StageAction(action, args, line)
 
 
+def updateHomeRegistry(registry: str) -> None:
+    config_data: dict = {}
+    if os.path.isfile(CONFIG_PATH):
+        with open(CONFIG_PATH) as config_file:
+            config_data = json.load(config_file)
+    config_data["registry"] = registry
+    with open(CONFIG_PATH, "w") as config_file:
+        json.dump(config_data, config_file, indent=4)
+        config_file.write("\n")
+
+
 def runStagedCommand(command: str) -> None:
     printStatus("cmd", command, "info")
     result: subprocess.CompletedProcess = subprocess.run(command, shell=True, cwd=os.getcwd())
@@ -514,7 +771,11 @@ def runStagedCommand(command: str) -> None:
         printStatus("fail", f"Command failed with exit code {result.returncode}: {command}", "error")
         raise SystemExit(result.returncode)
 
-def queueInstallToRoot(address: str, install_root: str = "ww", reinstall: bool = True, work_dir: str = ".") -> asyncio.Task:
+def queueInstallToRoot(address: str, install_root: str = "distrobase", reinstall: bool = True, work_dir: str = ".") -> asyncio.Task:
+    install_root = os.path.join(
+        install_root,
+        getAddressInfo(address)["distro"].lower(),
+    )
     resolved_address: str = address
     key: tuple[str, str] = (resolved_address.lower(), os.path.realpath(install_root))
     if key in running_installs:
@@ -537,15 +798,15 @@ async def executeStageOrdered(actions: list[StageAction]) -> None:
     for action in actions:
         if action.action == "ADDDEP":
             address = action.args[0]
-            result: InstallResult = await queueInstallToRoot(address, "ww", True)
-            printInstallResult(result)
+            result: Result = await queueInstallToRoot(address, "distrobase", True)
+            printResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         elif action.action == "ADDLIB":
             project, address = action.args
-            install_root: str = os.path.join(project, "libraries", "ww")
+            install_root: str = os.path.join(project, "libraries", "distrobase")
             result = await queueInstallToRoot(address, install_root, True)
-            printInstallResult(result)
+            printResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         elif action.action == "ADDNDEP":
@@ -575,7 +836,7 @@ async def executeStageOrdered(actions: list[StageAction]) -> None:
         elif action.action == "GETINTERNAL":
             address = action.args[0]
             result = await installAsync(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
-            printInstallResult(result)
+            printResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
             await installSubdependencies(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
@@ -585,19 +846,25 @@ async def executeStageOrdered(actions: list[StageAction]) -> None:
             printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from {INTERNAL_WW_DIR}.", "success")
         elif action.action == "RMDEP":
             address = action.args[0]
-            deleted: int = removeAddressVersions("ww", address)
+            deleted: int = removeAddressVersions("distrobase", address)
             printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./ww.", "success")
         elif action.action == "RMLIB":
             project, address = action.args
             install_root = os.path.join(project, "libraries", "ww")
             deleted = removeAddressVersions(install_root, address)
             printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./{project}/libraries/ww.", "success")
+        elif action.action == "PUBLISH":
+            project, address = action.args
+            result = await publishDistro(project, address)
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        elif action.action == "REGISTRY":
+            registry = action.args[0]
+            updateHomeRegistry(registry)
+            printStatus("done", f"Home registry set to '{registry}'.", "success")
         elif action.action == "RUNCMD":
             runStagedCommand(action.args[0])
-        elif action.action == "COMPAT":
-            mode, target, custom_phrase = action.args
-            files_changed, lines_changed = applyCompat(target, mode, custom_phrase)
-            printStatus("done", f"Compatibility rewrite completed: {files_changed} file{'s' if files_changed != 1 else ''} changed with {lines_changed} line{'s' if lines_changed != 1 else ''} modified.", "success")
 
 
 async def commitStageBatched(actions: list[StageAction]) -> None:
@@ -640,6 +907,16 @@ async def commitStageBatched(actions: list[StageAction]) -> None:
             except SystemExit as err:
                 command_failures = int(err.code) if isinstance(err.code, int) else 1
                 break
+        elif action.action == "PUBLISH":
+            project, address = action.args
+            result = await publishDistro(project, address)
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        elif action.action == "REGISTRY":
+            registry = action.args[0]
+            updateHomeRegistry(registry)
+            printStatus("done", f"Home registry set to '{registry}'.", "success")
         elif action.action == "ADDNDEP":
             address = action.args[0]
             if addHydrodepDependency(".", address):
@@ -668,34 +945,34 @@ async def commitStageBatched(actions: list[StageAction]) -> None:
             address = action.args[0]
             result = await installAsync(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
             if result.exit_code:
-                printInstallResult(result)
+                printResult(result)
                 raise SystemExit(result.exit_code)
-            printInstallResult(result)
+            printResult(result)
             await installSubdependencies(address, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
     if command_failures:
         raise SystemExit(command_failures)
 
     install_tasks: list[asyncio.Task] = []
     for address in add_dep:
-        install_tasks.append(queueInstallToRoot(address, "ww", True))
+        install_tasks.append(queueInstallToRoot(address, "distrobase", True))
     for project, address in add_lib:
-        install_tasks.append(queueInstallToRoot(address, os.path.join(project, "libraries", "ww"), True))
+        install_tasks.append(queueInstallToRoot(address, os.path.join(project, "libraries", "distrobase"), True, "."))
 
     if install_tasks:
-        install_results: list[InstallResult] = await asyncio.gather(*install_tasks)
+        install_results: list[Result] = await asyncio.gather(*install_tasks)
         install_failures: int = 0
         for result in install_results:
-            printInstallResult(result)
+            printResult(result)
             install_failures += int(bool(result.exit_code))
         if install_failures:
             printStatus("fail", f"Commit install finished with {install_failures} failure{'s' if install_failures != 1 else ''}.", "error")
             raise SystemExit(1)
 
     for address in rm_dep:
-        deleted: int = removeAddressVersions("ww", address)
+        deleted: int = removeAddressVersions("distrobase", address)
         printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./ww.", "success")
     for project, address in rm_lib:
-        install_root: str = os.path.join(project, "libraries", "ww")
+        install_root: str = os.path.join(project, "libraries", "distrobase")
         deleted = removeAddressVersions(install_root, address)
         printStatus("done", f"Removed {deleted} installed copy{'ies' if deleted != 1 else ''} of '{address}' from ./{project}/libraries/ww.", "success")
 
@@ -724,7 +1001,7 @@ async def runStaged(mode: str) -> None:
 
 async def handleStageCommand(args: list[str]) -> None:
     if not args:
-        printStatus("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|getinternal|rminternal|getdepinternal|cancel|execute|commit> [...]", "warning")
+        printStatus("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|cmd|getinternal|rminternal|getdepinternal|cancel|execute|commit> [...]", "warning")
         sys.exit(1)
 
     subcommand: str = args[0].lower()
@@ -839,23 +1116,23 @@ async def handleStageCommand(args: list[str]) -> None:
         printStatus("stage", f"Staged getdepinternal {target}", "success")
         return
 
-    if subcommand == "compat":
+    if subcommand == "publish":
         if len(args) < 3:
-            printStatus("help", f"Usage: {COMMAND} stage compat <mode> <address|directory> [custom-phrase]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage publish <project> <address>", "warning")
             sys.exit(1)
-        mode: str = args[1]
-        target: str = args[2]
-        if mode not in COMPAT_MODES and mode != "custom":
-            printStatus("help", f"Usage: {COMMAND} stage compat <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> <address|directory> [custom-phrase]", "warning")
+        project: str = args[1]
+        address: str = args[2]
+        appendStageLine(f"PUBLISH|{project}|{address}")
+        printStatus("stage", f"Staged publish {project} {address}", "success")
+        return
+
+    if subcommand == "registry":
+        if len(args) < 2:
+            printStatus("help", f"Usage: {COMMAND} stage registry <registry>", "warning")
             sys.exit(1)
-        custom_phrase: str = ""
-        if mode == "custom":
-            if len(args) < 4:
-                printStatus("help", f"Usage: {COMMAND} stage compat custom <address|directory> <custom-phrase>", "warning")
-                sys.exit(1)
-            custom_phrase = args[3]
-        appendStageLine(f"COMPAT|{mode}|{target}|{custom_phrase}")
-        printStatus("stage", f"Staged compat {mode} {target}", "success")
+        registry: str = " ".join(args[1:])
+        appendStageLine(f"REGISTRY|{registry}")
+        printStatus("stage", f"Staged registry {registry}", "success")
         return
 
     if subcommand == "cmd":
@@ -887,7 +1164,7 @@ async def handleStageCommand(args: list[str]) -> None:
         command_name: str = args[1].lower()
         tag: str | None = stageTagForCommand(command_name)
         if tag is None:
-            printStatus("help", f"Usage: {COMMAND} stage cancel [get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|getinternal|rminternal|getdepinternal|last] [args]", "warning")
+            printStatus("help", f"Usage: {COMMAND} stage cancel [get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|publish|registry|rm|rmlib|cmd|getinternal|rminternal|getdepinternal|last] [args]", "warning")
             sys.exit(1)
 
         target_line: str | None = None
@@ -947,14 +1224,19 @@ async def handleStageCommand(args: list[str]) -> None:
             project = args[2]
             address = args[3]
             target_line = f"RMLIB|{project}|{address}"
-        elif tag == "COMPAT":
-            if len(args) < 5:
-                printStatus("help", f"Usage: {COMMAND} stage cancel compat <mode> <target> <custom_phrase>", "warning")
+        elif tag == "PUBLISH":
+            if len(args) < 4:
+                printStatus("help", f"Usage: {COMMAND} stage cancel publish <project> <address>", "warning")
                 sys.exit(1)
-            mode = args[2]
-            target = args[3]
-            custom_phrase = args[4]
-            target_line = f"COMPAT|{mode}|{target}|{custom_phrase}"
+            project = args[2]
+            address = args[3]
+            target_line = f"PUBLISH|{project}|{address}"
+        elif tag == "REGISTRY":
+            if len(args) < 3:
+                printStatus("help", f"Usage: {COMMAND} stage cancel registry <registry>", "warning")
+                sys.exit(1)
+            registry = " ".join(args[2:])
+            target_line = f"REGISTRY|{registry}"
         elif tag == "RUNCMD":
             if len(args) < 3:
                 printStatus("help", f"Usage: {COMMAND} stage cancel cmd <command>", "warning")
@@ -999,11 +1281,11 @@ async def handleStageCommand(args: list[str]) -> None:
         return
 
     printStatus("help", f"Unknown stage subcommand: {subcommand}", "warning")
-    printStatus("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|rm|rmlib|compat|cmd|getinternal|rminternal|getdepinternal|cancel|execute|commit> [...]", "warning")
+    printStatus("help", f"Usage: {COMMAND} stage <get|getlib|adddep|rmdep|getdep|forcegetdep|updlibs|publish|registry|rm|rmlib|cmd|getinternal|rminternal|getdepinternal|cancel|execute|commit> [...]", "warning")
     sys.exit(1)
     
 async def reinstallProjectLibraries(project: str) -> None:
-    install_root: str = os.path.join(project, "libraries", "ww")
+    install_root: str = os.path.join(project, "libraries")
     if not os.path.isdir(install_root):
         printStatus("miss", f"No library directory found at '{install_root}'.", "warning")
         raise SystemExit(1)
@@ -1022,7 +1304,7 @@ async def reinstallProjectLibraries(project: str) -> None:
             printStatus("skip", f"Could not parse installed library directory '{entry}'.", "warning")
             continue
         pub, rel = parsed
-        tasks.append(queueInstallToRoot(pub, rel, install_root, True))
+        tasks.append(queueInstallToRoot(pub, install_root, True, "."))
 
     if not tasks:
         printStatus("miss", "No reinstallable libraries were found.", "warning")
@@ -1030,10 +1312,10 @@ async def reinstallProjectLibraries(project: str) -> None:
             printStatus("info", f"Ignored {ignored} unrecognized directory(ies).", "muted")
         return
 
-    results: list[InstallResult] = await asyncio.gather(*tasks)
+    results: list[Result] = await asyncio.gather(*tasks)
     failures: int = 0
     for result in results:
-        printInstallResult(result)
+        printResult(result)
         failures += int(bool(result.exit_code))
     if failures:
         printStatus("fail", f"Library reinstall finished with {failures} failure{'s' if failures != 1 else ''}.", "error")
@@ -1041,30 +1323,28 @@ async def reinstallProjectLibraries(project: str) -> None:
 
     printStatus("done", f"Reinstalled {len(results)} librar{'y' if len(results) == 1 else 'ies'} from {install_root}.", "success")
 
-def installAddress(address: str, reinstall: bool = True) -> InstallResult:
+def installDistro(address: str, reinstall: bool = True) -> Result:
     return installDistroToRoot(address, os.path.join("", getAddressInfo(address)['author'], getAddressInfo(address)['distro']), reinstall)
 
-def installDistroToRoot(address: str, install_root: str = "distrobase", reinstall: bool = True, work_dir: str = ".") -> InstallResult:
+def installDistroToRoot(address: str, install_root: str = "distrobase", reinstall: bool = True, work_dir: str = ".") -> Result:
     info = getAddressInfo(address)
     install_root = os.path.abspath(install_root)
     work_dir = os.path.abspath(work_dir)
     os.makedirs(install_root, exist_ok=True)
     os.makedirs(work_dir, exist_ok=True)
     if info["type"] == "local":
-        return InstallResult(
-            status="error",
-            success=False,
-            message="Local Distrobase installation is not implemented yet.",
-            lines=["Local Distrobase installation is not implemented yet."],
-            exit_code=1,
-        )
-    registry = info["registry"]
-    if registry.startswith("http://") or registry.startswith("https://"):
-        base_url = registry.rstrip("/")
-    else:
-        base_url = f"https://dstbs.{registry}"
-    if registry.startswith("127.0.0.1") or registry.startswith("localhost"):
-        base_url = f"http://{registry}".rstrip("/")
+        try:
+            return installLocalDistro(address, info, install_root, reinstall, work_dir)
+        except Exception as exc:
+            return Result(
+                status="error",
+                success=False,
+                lines=[f"Failed to install {address}: {exc}"],
+                message=f"Failed to install {address}: {exc}",
+                exit_code=1,
+            )
+    registry: str = info["registry"]
+    base_url: str = registryBaseUrl(registry)
     author = info["author"]
     distro = info["distro"]
     version = info["version"]
@@ -1160,7 +1440,7 @@ def installDistroToRoot(address: str, install_root: str = "distrobase", reinstal
             install_root
         ):
             if not reinstall:
-                return InstallResult(
+                return Result(
                     status="error",
                     success=False,
                     message=(
@@ -1200,7 +1480,7 @@ def installDistroToRoot(address: str, install_root: str = "distrobase", reinstal
                 source,
                 destination,
             )
-        return InstallResult(
+        return Result(
             status="success",
             success=True,
             lines=[
@@ -1217,6 +1497,8 @@ def installDistroToRoot(address: str, install_root: str = "distrobase", reinstal
             ),
             exit_code=0,
         )
+    except urllib.error.URLError as exc:
+        return registryNetworkError(address, registry, exc)
     except Exception as exc:
         if os.path.exists(install_root):
             for name in os.listdir(install_root):
@@ -1231,7 +1513,7 @@ def installDistroToRoot(address: str, install_root: str = "distrobase", reinstal
                     shutil.rmtree(path)
                 else:
                     os.remove(path)
-        return InstallResult(
+        return Result(
             status="error",
             success=False,
             lines=[
@@ -1248,19 +1530,24 @@ def installDistroToRoot(address: str, install_root: str = "distrobase", reinstal
             ignore_errors=True,
         )
 
-def queueInstall(address: str, reinstall: bool = True, install_root: str = "ww", work_dir: str = ".") -> asyncio.Task:
+def queueInstall(address: str, reinstall: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> asyncio.Task:
     return queueInstallToRoot(address, install_root, reinstall, work_dir)
 
-async def installAsync(address: str, reinstall: bool = True, color: bool = True, emit: bool = True, fatal: bool = True, install_root: str = "ww", work_dir: str = ".") -> InstallResult:
-    result: InstallResult = await asyncio.to_thread(queueInstallToRoot, address, install_root, reinstall, work_dir)
+async def installAsync(address: str, reinstall: bool = True, color: bool = True, emit: bool = True, fatal: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> Result:
+    result: Result = await queueInstallToRoot(
+        address,
+        install_root,
+        reinstall,
+        work_dir,
+    )
     if emit:
-        printInstallResult(result, color)
+        printResult(result, color)
     if fatal and result.exit_code:
         raise SystemExit(result.exit_code)
     return result
 
 
-async def getdepRecursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[str] | None = None, force: bool = False, install_root: str = "ww", work_dir: str = ".") -> None:
+async def getdepRecursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[str] | None = None, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
     dep_path: str = dependencyFilePath(path)
     if visited is None:
         visited = set()
@@ -1319,9 +1606,9 @@ async def getdepRecursive(path: str, color: bool = True, log: bool = True, visit
     if print_tip:
         printStatus("deny", "To allow scripts, re-run with '--allow'. To skip scripts, re-run with '--skip'.", "info")
     tasks: list[asyncio.Task] = [queueInstall(address, (force), install_root, work_dir) for address in pending_deps]
-    results: list[InstallResult] = await asyncio.gather(*tasks)
+    results: list[Result] = await asyncio.gather(*tasks)
     for result in results:
-        printInstallResult(result, color)
+        printResult(result, color)
 
     failures: int = sum(1 for result in results if result.exit_code)
     if failures:
@@ -1336,11 +1623,11 @@ async def getdepRecursive(path: str, color: bool = True, log: bool = True, visit
         printStatus("done", "All dependencies are ready.", "success")
 
 
-async def getDep(path: str, color: bool = True, log: bool = True, force: bool = False, install_root: str = "ww", work_dir: str = ".") -> None:
+async def getDep(path: str, color: bool = True, log: bool = True, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
     await getdepRecursive(path, color=color, log=log, force=force, install_root=install_root, work_dir=work_dir)
 
 
-async def getDepEverywhere(path: str, color: bool = True, force: bool = False, install_root: str = "ww", work_dir: str = ".") -> None:
+async def getDepEverywhere(path: str, color: bool = True, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
     dep_files: list[str] = findHydrodepFiles(path)
     if not dep_files:
         printStatus("miss", f"No .hydrodep files found under '{path}'.", "warning")
@@ -1353,7 +1640,7 @@ async def getDepEverywhere(path: str, color: bool = True, force: bool = False, i
         await getdepRecursive(dep_file, color=color, log=True, visited=visited, installed=installed, force=force, install_root=install_root, work_dir=work_dir)
 
 
-async def installSubdependencies(address: str, color: bool = True, install_root: str = "ww", work_dir: str = ".") -> None:
+async def installSubdependencies(address: str, color: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> None:
     resolved_address: str = address
     dep_path: str = dependencyFilePath(addressDirname(resolved_address, install_root))
     printStatus("deps", f"Checking sub-dependencies for {resolved_address}", "info")
@@ -1414,82 +1701,405 @@ def unloadLen() -> None:
         printStatus("done", "LEN unloaded.", "success")
     else:
         printStatus("info", "LEN is not loaded.", "muted")
+        
+async def publishDistro(
+    project_path: str,
+    address: str,
+) -> Result:
 
-async def build(format: str, source_path: str = ".", output_path: str = "build.%") -> None:
-    printStatus("build", "Preparing build...", "info")
     try:
-        output_path = output_path.replace("%", {
-            "zip": "zip",
-            "targz": "tar.gz",
-            "n2x": "n2x",
-            "modm": "modm"
-        }[format])
-    except KeyError:
-        printStatus("fail", f"Unknown build format '{format}'.", "error")
-        return
-    if not os.path.isdir(source_path):
-        printStatus("fail", f"Source path '{source_path}' does not exist or is not a directory.", "error")
-        return
-    source_abs: str = os.path.abspath(source_path)
-    output_abs: str = os.path.abspath(output_path)
-    output_dir: str = os.path.dirname(output_abs)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir, exist_ok=True)
+        project_path = os.path.abspath(
+            os.path.expanduser(project_path)
+        )
 
-    def should_skip(path: str) -> bool:
-        return os.path.abspath(path) == output_abs
+        if not os.path.isdir(project_path):
+            return Result(
+                status="error",
+                success=False,
+                lines=[
+                    f"Project directory not found: {project_path}"
+                ],
+                message=(
+                    f"Project directory not found: "
+                    f"{project_path}"
+                ),
+                exit_code=1,
+            )
 
-    match format:
-        case "zip":
-            printStatus("build", f"Building project into {output_path}...", "info")
-            with zipfile.ZipFile(output_abs, "w", zipfile.ZIP_DEFLATED) as zipf:
-                for root, dirs, files in os.walk(source_abs):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        if should_skip(file_path):
+        info = getAddressInfo(address)
+
+        if info["type"] != "registry" and info["type"] != "local":
+            return Result(
+                status="error",
+                success=False,
+                lines=[
+                    f"Unsupported publish address: {address}"
+                ],
+                message=(
+                    f"Unsupported publish address: {address}"
+                ),
+                exit_code=1,
+            )
+
+        author = info["author"]
+        distro = info["distro"]
+        version = info["version"]
+
+        if version == "latest":
+            return Result(
+                status="error",
+                success=False,
+                lines=[
+                    "A release version is required when publishing."
+                ],
+                message=(
+                    "A release version is required when publishing."
+                ),
+                exit_code=1,
+            )
+
+        temp_dir = tempfile.mkdtemp(
+            prefix="hydrogen-publish-"
+        )
+
+        try:
+            # ---------------------------------------------------------
+            # Build artifact
+            # ---------------------------------------------------------
+
+            archive = os.path.join(
+                temp_dir,
+                f"{version}.tar.gz",
+            )
+
+            printStatus(
+                "build",
+                f"Building project into {archive}...",
+                "info",
+            )
+
+            with tarfile.open(
+                archive,
+                "w:gz",
+            ) as tar:
+
+                for root, dirs, files in os.walk(
+                    project_path
+                ):
+                    dirs[:] = [
+                        directory
+                        for directory in dirs
+                        if directory not in {
+                            ".git",
+                            "__pycache__",
+                            ".venv",
+                            "venv",
+                            "node_modules",
+                        }
+                    ]
+
+                    for file_name in files:
+                        file_path = os.path.join(
+                            root,
+                            file_name,
+                        )
+
+                        if os.path.abspath(
+                            file_path
+                        ) == os.path.abspath(
+                            archive
+                        ):
                             continue
-                        arcname = os.path.relpath(file_path, source_abs)
-                        printStatus("pack", f"Packing {arcname}", "info")
-                        zipf.write(file_path, arcname)
-            printStatus("done", f"Build complete in {output_path}", "success")
-        case "targz":
-            printStatus("build", f"Building project into {output_path}...", "info")
-            with tarfile.open(output_abs, "w:gz") as tar:
-                for root, dirs, files in os.walk(source_abs):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        if should_skip(file_path):
-                            continue
-                        arcname = os.path.relpath(file_path, source_abs)
-                        printStatus("pack", f"Packing {arcname}", "info")
-                        tar.add(file_path, arcname=arcname)
-            printStatus("done", f"Build complete in {output_path}", "success")
-        case "n2x":
-            printStatus("build", f"Building project into {output_path}...", "info")
-            required_files = ["ext.py", "README.md", "LICENSE.md", ".hydrodep"]
-            with tarfile.open(output_abs, "w:gz") as tar:
-                for file in required_files:
-                    file_path = os.path.join(source_abs, file)
-                    printStatus("pack", f"Packing {file}", "info")
-                    if not os.path.isfile(file_path):
-                        printStatus("fail", f"Required file for build not found: '{file}'", "error")
-                        return
-                    tar.add(file_path, arcname=file)
-            printStatus("done", f"Build complete in {output_path}", "success")
-        case "modm":
-            printStatus("build", f"Building project into {output_path}...", "info")
-            with tarfile.open(output_abs, "w:gz") as tar:
-                for root, dirs, files in os.walk(source_abs):
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        if should_skip(file_path):
-                            continue
-                        arcname = os.path.relpath(file_path, source_abs)
-                        printStatus("pack", f"Packing {arcname}", "info")
-                        tar.add(file_path, arcname=arcname)
-            printStatus("done", f"Build complete in {output_path}", "success")
-        case _:
-            printStatus("fail", f"Unknown build format '{format}'.", "error")
+
+                        arcname = os.path.relpath(
+                            file_path,
+                            project_path,
+                        )
+
+                        printStatus(
+                            "pack",
+                            f"Packing {arcname}",
+                            "info",
+                        )
+
+                        tar.add(
+                            file_path,
+                            arcname=arcname,
+                        )
+
+            printStatus(
+                "done",
+                f"Build complete in {archive}",
+                "success",
+            )
+
+            if not os.path.isfile(archive):
+                raise RuntimeError(
+                    "Build did not produce an archive."
+                )
+
+            # ---------------------------------------------------------
+            # Local registry
+            # ---------------------------------------------------------
+
+            if info["type"] == "local":
+
+                local_root = localRegistryPath(
+                    info["registry"]
+                )
+
+                # TODO: does local when it shouldn't
+                
+                release_dir = os.path.join(
+                    local_root,
+                    author,
+                    distro,
+                )
+
+                os.makedirs(
+                    release_dir,
+                    exist_ok=True,
+                )
+
+                destination = os.path.join(
+                    release_dir,
+                    f"{version}.tar.gz",
+                )
+
+                if os.path.exists(destination):
+                    raise RuntimeError(
+                        f"Release {version} already exists."
+                    )
+
+                shutil.copy2(
+                    archive,
+                    destination,
+                )
+
+                return Result(
+                    status="success",
+                    success=True,
+                    lines=[
+                        (
+                            f"Published "
+                            f"{author}.{distro} "
+                            f"release {version} "
+                            f"to {release_dir}"
+                        ),
+                        (
+                            f"Artifact: "
+                            f"{os.path.basename(destination)}"
+                        ),
+                        (
+                            f"Size: "
+                            f"{os.path.getsize(destination)} bytes"
+                        ),
+                    ],
+                    message=(
+                        f"Published "
+                        f"{author}.{distro} "
+                        f"release {version} "
+                        f"to {release_dir}"
+                    ),
+                    exit_code=0,
+                )
+
+            # ---------------------------------------------------------
+            # Remote registry
+            # ---------------------------------------------------------
+
+            registry = info["registry"]
+
+            base_url = registryBaseUrl(
+                registry
+            )
+
+            url = (
+                f"{base_url}/v1/"
+                f"{urllib.parse.quote(author)}/"
+                f"{urllib.parse.quote(distro)}/"
+                f"{urllib.parse.quote(version)}"
+            )
+
+            boundary = (
+                "----HydrogenPublish"
+                + os.urandom(16).hex()
+            )
+
+            filename = os.path.basename(
+                archive
+            )
+
+            with open(
+                archive,
+                "rb",
+            ) as file:
+                file_data = file.read()
+
+            body = bytearray()
+
+            body.extend(
+                (
+                    f"--{boundary}\r\n"
+                    f'Content-Disposition: form-data; '
+                    f'name="artifact"; '
+                    f'filename="{filename}"\r\n'
+                    f"Content-Type: application/gzip\r\n"
+                    f"\r\n"
+                ).encode()
+            )
+
+            body.extend(
+                file_data
+            )
+
+            body.extend(
+                (
+                    f"\r\n"
+                    f"--{boundary}--\r\n"
+                ).encode()
+            )
+
+            request = urllib.request.Request(
+                url,
+                data=bytes(body),
+                method="POST",
+                headers={
+                    "Content-Type": (
+                        "multipart/form-data; "
+                        f"boundary={boundary}"
+                    ),
+                    "Content-Length": str(
+                        len(body)
+                    ),
+                },
+            )
+
+            printStatus(
+                "send",
+                (
+                    f"Publishing "
+                    f"{author}.{distro} "
+                    f"release {version} "
+                    f"to {registry}..."
+                ),
+                "info",
+            )
+
+            with urllib.request.urlopen(
+                request
+            ) as response:
+
+                response_data = json.load(
+                    response
+                )
+
+            artifact_name = response_data.get(
+                "name",
+                filename,
+            )
+
+            artifact_size = response_data.get(
+                "size",
+                os.path.getsize(archive),
+            )
+
+            artifact_sha256 = response_data.get(
+                "sha256",
+                "",
+            )
+
+            return Result(
+                status="success",
+                success=True,
+                lines=[
+                    (
+                        f"Published "
+                        f"{author}.{distro} "
+                        f"release {version} "
+                        f"to {registry}"
+                    ),
+                    (
+                        f"Artifact: "
+                        f"{artifact_name}"
+                    ),
+                    (
+                        f"Size: "
+                        f"{artifact_size} bytes"
+                    ),
+                    (
+                        f"SHA-256: "
+                        f"{artifact_sha256}"
+                    ),
+                ],
+                message=(
+                    f"Published "
+                    f"{author}.{distro} "
+                    f"release {version} "
+                    f"to {registry}"
+                ),
+                exit_code=0,
+            )
+
+        finally:
+            shutil.rmtree(
+                temp_dir,
+                ignore_errors=True,
+            )
+
+    except urllib.error.HTTPError as exc:
+
+        try:
+            detail = exc.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+        except Exception:
+            detail = str(exc)
+
+        return Result(
+            status="error",
+            success=False,
+            lines=[
+                (
+                    f"Registry returned "
+                    f"HTTP {exc.code}: {detail}"
+                )
+            ],
+            message=(
+                f"Registry returned "
+                f"HTTP {exc.code}: {detail}"
+            ),
+            exit_code=1,
+        )
+
+    except urllib.error.URLError as exc:
+
+        return Result(
+            status="error",
+            success=False,
+            lines=[
+                f"Could not reach registry: {exc}"
+            ],
+            message=(
+                f"Could not reach registry: {exc}"
+            ),
+            exit_code=1,
+        )
+
+    except Exception as exc:
+
+        return Result(
+            status="error",
+            success=False,
+            lines=[
+                f"Failed to publish {address}: {exc}"
+            ],
+            message=(
+                f"Failed to publish {address}: {exc}"
+            ),
+            exit_code=1,
+        )
 
 async def main() -> None:
     if len(sys.argv) == 1:
@@ -1506,23 +2116,68 @@ async def main() -> None:
             file.write("")
     
     match sys.argv[1]:
+        case "registry":
+            if len(sys.argv) != 3 or not sys.argv[2].strip():
+                printStatus("help", f"Usage: {COMMAND} registry <registry>", "warning")
+                sys.exit(1)
+            registry_value: str = sys.argv[2].strip()
+            try:
+                config_data: dict = {}
+                if os.path.isfile(CONFIG_PATH):
+                    with open(CONFIG_PATH) as config_file:
+                        config_data = json.load(config_file)
+                config_data["registry"] = registry_value
+                with open(CONFIG_PATH, "w") as config_file:
+                    json.dump(config_data, config_file, indent=4)
+                    config_file.write("\n")
+                printStatus("done", f"Home registry set to '{registry_value}'.", "success")
+            except (OSError, ValueError) as exc:
+                printStatus("fail", f"Could not save registry configuration: {exc}", "error")
+                sys.exit(1)
         case "get":
             if len(sys.argv) == 2:
                 printStatus("help", f"Usage: {COMMAND} get <address>", "warning")
                 sys.exit(1)
             address: str = sys.argv[2]
-            result: InstallResult = await installAsync(address)
+            result: Result = await installAsync(address)
             if not result.exit_code:
                 await installSubdependencies(address)
+        case "url":
+            if len(sys.argv) != 3:
+                printStatus("help", f"Usage: {COMMAND} url <address>", "warning")
+                sys.exit(1)
+            address: str = sys.argv[2]
+            try:
+                print(findDistroLocation(address))
+            except (FileNotFoundError, RuntimeError, ValueError, OSError) as exc:
+                printDistroLocationError(address, exc)
+                sys.exit(1)
+        case "view":
+            if len(sys.argv) != 3:
+                printStatus("help", f"Usage: {COMMAND} view <address>", "warning")
+                sys.exit(1)
+            result = viewDistro(sys.argv[2])
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
         case "getlib":
             if len(sys.argv) < 4:
                 printStatus("help", f"Usage: {COMMAND} getlib <project> <address>", "warning")
                 sys.exit(1)
             project: str = sys.argv[2]
             address = sys.argv[3]
-            install_root: str = os.path.join(project, "libraries", "ww")
+            install_root: str = os.path.join(project, "libraries", getAddressInfo(address)['author'])
             result = await queueInstallToRoot(address, install_root, True)
-            printInstallResult(result)
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        case "publish":
+            if len(sys.argv) < 4:
+                printStatus("help", f"Usage: {COMMAND} publish <project_directory> <address>", "warning")
+                sys.exit(1)
+            result = await publishDistro(sys.argv[2],sys.argv[3])
+            printResult(result)
+
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         case "rm":
@@ -1532,12 +2187,12 @@ async def main() -> None:
             pub: str = sys.argv[2]
             printStatus("rm", f"Deleting {pub}", "info")
             if pub.strip() == "all":
-                if os.path.exists("ww"):
-                    shutil.rmtree("ww")
+                if os.path.exists("distrobase"):
+                    shutil.rmtree("distrobase")
                 else:
                     printStatus("info", "No address installed.", "muted")
             else:
-                deleted: int = removeAddressVersions("ww", pub)
+                deleted: int = removeAddressVersions("distrobase", pub)
                 if deleted:
                     printStatus("done", "Operation complete.", "success")
                 else:
@@ -1553,45 +2208,6 @@ async def main() -> None:
                 printStatus("help", f"Usage: {COMMAND} updlibs <project>", "warning")
                 sys.exit(1)
             await reinstallProjectLibraries(sys.argv[2])
-        case "compat":
-            if len(sys.argv) < 4:
-                printStatus("help", f"Usage: {COMMAND} compat <address|directory> <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
-                sys.exit(1)
-            compat_target: str = sys.argv[3]
-            compat_mode: str = sys.argv[2]
-            if compat_mode not in COMPAT_BUILTIN_PREFIXES and compat_mode != "custom":
-                printStatus("help", f"Usage: {COMMAND} compat <address|directory> <mode(abs|rel|rel-up1|rel-up2|rel-up3|abs-ww|rel-ww|rel-libs-ww|custom)> [custom-phrase]", "warning")
-                sys.exit(1)
-            compat_custom_phrase: str = ""
-            if compat_mode == "custom":
-                if len(sys.argv) < 5:
-                    printStatus("help", f"Usage: {COMMAND} compat <address|directory> custom <custom-phrase>", "warning")
-                    sys.exit(1)
-                compat_custom_phrase = sys.argv[4]
-
-            compat_dirs: list[str]
-            if "/" in compat_target:
-                compat_dirs = [compat_target]
-            else:
-                compat_dirs = []
-                if os.path.isdir("ww"):
-                    compat_dirs = [
-                        os.path.join("ww", name) for name in os.listdir("ww")
-                        if os.path.isdir(os.path.join("ww", name)) and name.lower().startswith(pub)
-                    ]
-
-            compat_dirs = [directory for directory in compat_dirs if os.path.exists(directory)]
-            if not compat_dirs:
-                printStatus("miss", f"Could not find any installed directories for '{compat_target}'.", "warning")
-                sys.exit(1)
-
-            compat_total_files: int = 0
-            compat_total_lines: int = 0
-            for compat_dir in compat_dirs:
-                files_changed, lines_changed = applyCompat(compat_dir, compat_mode, compat_custom_phrase)
-                compat_total_files += files_changed
-                compat_total_lines += lines_changed
-            printStatus("done", f"Updated {compat_total_lines} line{'s' if compat_total_lines != 1 else ''} across {compat_total_files} file{'s' if compat_total_files != 1 else ''}.", "success")
         case "getinternal":
             if len(sys.argv) == 2:
                 printStatus("help", f"Usage: {NAME} getinternal <address>", "warning")
@@ -1629,11 +2245,6 @@ async def main() -> None:
             await getDepEverywhere(path, install_root=INTERNAL_WW_DIR, work_dir=INTERNAL_TEMP_DIR)
         case "stage":
             await handleStageCommand(sys.argv[2:])
-        case "build":
-            if len(sys.argv) == 2:
-                printStatus("help", f"Usage: {COMMAND} build <format(zip|targz|n2x|modm)> [source path] [output path]", "warning")
-                sys.exit(1)
-            await build(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else ".", sys.argv[4] if len(sys.argv) > 4 else "build.%")
         case "readme":
             if len(sys.argv) == 2:
                 with open(os.path.join(os.path.dirname(__file__), "README.md")) as file:
@@ -1726,8 +2337,8 @@ async def main() -> None:
                             subprocess.run(["python", script_path, *sys.argv[2:]])
                             if os.path.exists(ext_dir_path):
                                 shutil.rmtree(ext_dir_path)
-                            if os.path.exists("ww"):
-                                shutil.rmtree("ww")
+                            if os.path.exists("distrobase"):
+                                shutil.rmtree("distrobase")
                             return
                     except Exception:
                         for line in traceback.format_exc().split("\n"):
@@ -1738,6 +2349,3 @@ async def main() -> None:
             
 def entrypoint() -> None:
     asyncio.run(main())
-    
-if __name__ == "__main__":
-    entrypoint()

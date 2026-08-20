@@ -1,11 +1,11 @@
-# Wednesware Nitrogen
+# Wednesware Hydrogen
 
-Easy, ultra-lightweight installer for Wednesware addresss.
+Sourcegen-based Distrobase installer.
 
 ## Installation methods:
 
 ### From PyPI via pipx (recommended, global install, run with `n2`):
-* `pipx install wwn`
+* `pipx install wwh`
 
 ### CURRENTLY NOT WORKING: From AUR via an AUR helper (best for arch linux, endeavouros, manjaro or garuda linux users, global install, run with `n2`):
 * `yay -S n2`
