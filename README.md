@@ -33,32 +33,43 @@ Sourcegen-based Distrobase installer.
 
 ### Commands
 
-* `h2 get <publication> [release (latest by default)]` - Download a Wednesware publication from GitHub.
-  * Example usage: `h2 get magnesium 26.3` (installs Magnesium release 26.3 to `ww/mg26_3`.)
-  * Tip: you can use chemical symbols for publications. Example: `h2 get mg 26.3`
-* `h2 url <address>` - Print the resolved distribution URL for an address without installing it.
+* `h2 get <address>` - Download a distribution from an address.
+* `h2 view <address>` - View information about a distribution.
+* `h2 url <address>` - Get the URL of a tar.gz artifact via an address.
 * `h2 fetch <address>` - Download a distribution to a temporary directory and print the extracted path.
-* `h2 getlib <project> <publication> [release (latest by default)]` - Download a Wednesware publication to `./<project>/libraries/ww`.
-  * Example usage: `h2 getlib app magnesium 26.3` (installs to `./app/libraries/ww/mg26_3`.)
-* `h2 rm <publication> [release (all by default)]` - Delete all releases or a specific release of a publication from the current directory.
-  * Example usage: `h2 rm magnesium 26.3` (deletes `./ww/magnesium26_3` and `./ww/mg26_3` only if present)
-  * Or: `h2 rm magnesium` (deletes all installed versions in `./ww` for both long and short publication names)
-  * Tip: you can use chemical symbols here too.
-* `h2 getdep [path]` - Search recursively under path for every `.nitrodep` and install dependencies.
-* `h2 forcegetdep [path]` - Same as `getdep`, but force reinstall dependencies.
-* `h2 updlibs <project>` - Reinstall all libraries found in `./<project>/libraries/ww` by reading installed publication names and versions.
-* `h2 stage get <publication> [release]` - Stage a dependency install into `./ww`.
-* `h2 stage getlib <project> <publication> [release]` - Stage a library install into `./<project>/libraries/ww`.
-* `h2 stage adddep <publication> [release]` - Stage adding a dependency to `./.nitrodep`.
-* `h2 stage rmdep <publication> [release]` - Stage removing a dependency from `./.nitrodep`.
-* `h2 stage getdep [target]` - Stage running `getdep` at target path (`.` by default).
-* `h2 stage forcegetdep [target]` - Stage running `forcegetdep` at target path (`.` by default).
-* `h2 stage updlibs [target]` - Stage running `updlibs` at target path (`.` by default).
-* `h2 stage rm <publication> [release]` - Stage removal from `./ww`.
-* `h2 stage rmlib <project> <publication> [release]` - Stage removal from `./<project>/libraries/ww`.
-* `h2 stage compat <publication> [release]` - Stage compatibility rewrite for Wednesware imports in a directory.
-* `h2 stage cmd <*cmd>` - Stage a shell command.
-* `h2 stage cancel [subcommand|last] [*arguments]` - Cancel staged entries, last entry, or all entries.
-* `h2 stage execute` - Run staged actions in the order they were staged.
-* `h2 stage commit` - Run staged actions in batched mode for faster installs.
-* `h2 help` - Prints a formatted help message to the terminal.
+* `h2 getlib <project> <address>` - Download a distribution into '<project>/libraries/author'.
+* `h2 publish <project> <address>` - Publish a distribution from a project directory to a registry.
+* `h2 rm <address>` - Delete one distribution or all installed distributions.
+* `h2 getdep [path]` - Install missing dependencies from a .hydrodep file, including nested ones.
+* `h2 forcegetdep [path]` - Install all dependencies, regardless of whether they are already installed from a .hydrodep file, including nested ones, forcing reinstallation of all dependencies.
+* `h2 updlibs <project>` - Reinstall all distributions in '<project>/libraries' from their exact installed addresses.
+* `h2 registry <registry>` - Set your home registry which will be used in operations when a registry is not specified.
+* `h2 stage get <address>` - Stage a dependency install into ./ww.
+* `h2 stage getlib <project> <address>` - Stage a library install into ./<project>/libraries/author.
+* `h2 stage adddep <address>` - Stage adding one dependency line to ./.hydrodep.
+* `h2 stage rmdep <address>` - Stage removing one dependency line from ./.hydrodep.
+* `h2 stage getdep [target]` - Stage running getdep at ./<target>.
+* `h2 stage forcegetdep [target]` - Stage running forcegetdep at ./<target>.
+* `h2 stage updlibs [target]` - Stage running updlibs at ./<target>.
+* `h2 stage rm <address>` - Stage dependency removal from ./ww.
+* `h2 stage rmlib <project> <address>` - Stage library removal from ./<project>/libraries/author.
+* `h2 stage publish <project> <address>` - Stage publishing a project distribution to a registry.
+* `h2 stage registry <registry>` - Stage setting the home registry.
+* `h2 stage cmd <command>` - Stage a shell command to run during stage execute/commit.
+* `h2 stage getinternal <address>` - Stage a dependency install into hydrogen/ww.
+* `h2 stage rminternal <address>` - Stage dependency removal from hydrogen/ww.
+* `h2 stage getdepinternal [target]` - Stage running getdep against hydrogen/ww at ./<target>.
+* `h2 stage cancel [subcommand|last] [args]` - Cancel one staged line, the last line, or the full stage.
+* `h2 stage execute` - Execute staged actions in exact order. Slower but guarantees order of operations.
+* `h2 stage commit` - Execute staged installs/removals in batched mode. Faster but does not guarantee order of operations.
+* `h2 readme [extension]` - Show the README for Hydrogen or an installed extension.
+* `h2 license [extension]` - Show the license for Hydrogen or an installed extension.
+* `h2 help` - Show this help message.
+* `h2 list-ext` - List installed extensions and their local paths.
+* `h2 trust-ext <extension>` - Trust an extension so it can run without confirmation.
+* `h2 untrust-ext <extension>` - Remove trust for an extension.
+* `h2 install-ext <extension>` - Install an extension from LEN.
+* `h2 uninstall-ext <extension>` - Remove an installed extension.
+* `h2 list-len` - List available extensions in LEN.
+* `h2 load-len` - Clone the LEN repository locally.
+* `h2 unload-len` - Remove the local LEN checkout.
