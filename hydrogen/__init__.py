@@ -10,7 +10,7 @@ SOURCEGEN_VERSION: str = "26.5" # SHOULD NOT BE CHANGED
 
 NAME: str = "Hydrogen" # TODO
 DESCRIPTION: str = "Sourcegen-based Distrobase installer." # TODO
-VERSION: str = "26.1" # TODO
+VERSION: str = "26.2" # TODO
 COMMAND: str = f"h2" # TODO
 
 CLI_RESET: str = "\033[0m"
@@ -121,6 +121,7 @@ def printHelp() -> None:
     printCommand("get <address>", "Download a distribution from an address.")
     printCommand("view <address>", "View information about a distribution.")
     printCommand("url <address>", "Get the URL of a tar.gz artifact via an address.")
+    printCommand("fetch <address>", "Download a distribution to a temporary directory and print the extracted path.")
     printCommand("getlib <project> <address>", "Download a distribution into '<project>/libraries/author'.")
     printCommand("publish <project> <address>", "Publish a distribution from a project directory to a registry.")
     printCommand("rm <address>", "Delete one distribution or all installed distributions.")
@@ -771,7 +772,7 @@ def runStagedCommand(command: str) -> None:
         printStatus("fail", f"Command failed with exit code {result.returncode}: {command}", "error")
         raise SystemExit(result.returncode)
 
-def queueInstallToRoot(address: str, install_root: str = "distrobase", reinstall: bool = True, work_dir: str = ".") -> asyncio.Task:
+def queueInstallToRoot(address: str, emit: bool = True, install_root: str = "distrobase", reinstall: bool = True, work_dir: str = ".") -> asyncio.Task:
     install_root = os.path.join(
         install_root,
         getAddressInfo(address)["distro"].lower(),
@@ -779,10 +780,12 @@ def queueInstallToRoot(address: str, install_root: str = "distrobase", reinstall
     resolved_address: str = address
     key: tuple[str, str] = (resolved_address.lower(), os.path.realpath(install_root))
     if key in running_installs:
-        printStatus("wait", f"Already queued {resolved_address.lower()} -> {install_root}", "muted")
+        if emit:
+            printStatus("wait", f"Already queued {resolved_address.lower()} -> {install_root}", "muted")
         return running_installs[key]
 
-    printStatus("queue", f"{resolved_address.lower()} -> {install_root}", "info")
+    if emit:
+        printStatus("queue", f"{resolved_address.lower()} -> {install_root}", "info")
     task: asyncio.Task = asyncio.create_task(asyncio.to_thread(installDistroToRoot, resolved_address, install_root, reinstall, work_dir))
     running_installs[key] = task
 
@@ -798,14 +801,14 @@ async def executeStageOrdered(actions: list[StageAction]) -> None:
     for action in actions:
         if action.action == "ADDDEP":
             address = action.args[0]
-            result: Result = await queueInstallToRoot(address, "distrobase", True)
+            result: Result = await queueInstallToRoot(address, True, "distrobase", True)
             printResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         elif action.action == "ADDLIB":
             project, address = action.args
             install_root: str = os.path.join(project, "libraries", "distrobase")
-            result = await queueInstallToRoot(address, install_root, True)
+            result = await queueInstallToRoot(address, True, install_root, True)
             printResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
@@ -954,9 +957,9 @@ async def commitStageBatched(actions: list[StageAction]) -> None:
 
     install_tasks: list[asyncio.Task] = []
     for address in add_dep:
-        install_tasks.append(queueInstallToRoot(address, "distrobase", True))
+        install_tasks.append(queueInstallToRoot(address, True, "distrobase", True))
     for project, address in add_lib:
-        install_tasks.append(queueInstallToRoot(address, os.path.join(project, "libraries", "distrobase"), True, "."))
+        install_tasks.append(queueInstallToRoot(address, True, os.path.join(project, "libraries", "distrobase"), True, "."))
 
     if install_tasks:
         install_results: list[Result] = await asyncio.gather(*install_tasks)
@@ -1304,7 +1307,7 @@ async def reinstallProjectLibraries(project: str) -> None:
             printStatus("skip", f"Could not parse installed library directory '{entry}'.", "warning")
             continue
         pub, rel = parsed
-        tasks.append(queueInstallToRoot(pub, install_root, True, "."))
+        tasks.append(queueInstallToRoot(pub, True, install_root, True, "."))
 
     if not tasks:
         printStatus("miss", "No reinstallable libraries were found.", "warning")
@@ -1530,12 +1533,13 @@ def installDistroToRoot(address: str, install_root: str = "distrobase", reinstal
             ignore_errors=True,
         )
 
-def queueInstall(address: str, reinstall: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> asyncio.Task:
-    return queueInstallToRoot(address, install_root, reinstall, work_dir)
+def queueInstall(address: str, emit: bool = True, reinstall: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> asyncio.Task:
+    return queueInstallToRoot(address, emit, install_root, reinstall, work_dir)
 
 async def installAsync(address: str, reinstall: bool = True, color: bool = True, emit: bool = True, fatal: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> Result:
     result: Result = await queueInstallToRoot(
         address,
+        emit,
         install_root,
         reinstall,
         work_dir,
@@ -1547,7 +1551,7 @@ async def installAsync(address: str, reinstall: bool = True, color: bool = True,
     return result
 
 
-async def getdepRecursive(path: str, color: bool = True, log: bool = True, visited: set[str] | None = None, installed: set[str] | None = None, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
+async def getdepRecursive(path: str, color: bool = True, emit: bool = True, visited: set[str] | None = None, installed: set[str] | None = None, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
     dep_path: str = dependencyFilePath(path)
     if visited is None:
         visited = set()
@@ -1569,10 +1573,10 @@ async def getdepRecursive(path: str, color: bool = True, log: bool = True, visit
         if line.strip() and not line.strip().startswith("//")
     ]
     if not deps:
-        if log:
+        if emit:
             printStatus("done", "No dependencies needed.", "success")
         return
-    if log:
+    if emit:
         printStatus("deps", f"Loaded {len(deps)} dependenc{'y' if len(deps) == 1 else 'ies'} from {dep_path}", "info")
     pending_deps: list[str] = []
     scripts_allowed: bool = "allow" if "--allow" in sys.argv else ("skip" if "--skip" in sys.argv else "deny")
@@ -1603,28 +1607,28 @@ async def getdepRecursive(path: str, color: bool = True, log: bool = True, visit
             continue
         installed.add(dep_key)
         pending_deps.append(dep_key)
-    if print_tip:
+    if emit and print_tip:
         printStatus("deny", "To allow scripts, re-run with '--allow'. To skip scripts, re-run with '--skip'.", "info")
-    tasks: list[asyncio.Task] = [queueInstall(address, (force), install_root, work_dir) for address in pending_deps]
+    tasks: list[asyncio.Task] = [queueInstall(address, emit, force, install_root, work_dir) for address in pending_deps]
     results: list[Result] = await asyncio.gather(*tasks)
     for result in results:
         printResult(result, color)
 
     failures: int = sum(1 for result in results if result.exit_code)
     if failures:
-        if log:
+        if emit:
             printStatus("fail", f"Dependency install finished with {failures} failure{'s' if failures != 1 else ''}.", "error")
         raise SystemExit(1)
 
     for address in deps:
         installed_dep_path: str = dependencyFilePath(addressDirname(address, install_root))
         await getdepRecursive(installed_dep_path, color=color, log=False, visited=visited, installed=installed, install_root=install_root, work_dir=work_dir)
-    if log:
+    if emit:
         printStatus("done", "All dependencies are ready.", "success")
 
 
-async def getDep(path: str, color: bool = True, log: bool = True, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
-    await getdepRecursive(path, color=color, log=log, force=force, install_root=install_root, work_dir=work_dir)
+async def getDep(path: str, color: bool = True, emit: bool = True, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
+    await getdepRecursive(path, color=color, emit=emit, force=force, install_root=install_root, work_dir=work_dir)
 
 
 async def getDepEverywhere(path: str, color: bool = True, force: bool = False, install_root: str = "distrobase", work_dir: str = ".") -> None:
@@ -1637,17 +1641,19 @@ async def getDepEverywhere(path: str, color: bool = True, force: bool = False, i
     visited: set[str] = set()
     installed: set[str] = set()
     for dep_file in dep_files:
-        await getdepRecursive(dep_file, color=color, log=True, visited=visited, installed=installed, force=force, install_root=install_root, work_dir=work_dir)
+        await getdepRecursive(dep_file, color=color, emit=True, visited=visited, installed=installed, force=force, install_root=install_root, work_dir=work_dir)
 
 
-async def installSubdependencies(address: str, color: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> None:
+async def installSubdependencies(address: str, color: bool = True, emit: bool = True, install_root: str = "distrobase", work_dir: str = ".") -> None:
     resolved_address: str = address
     dep_path: str = dependencyFilePath(addressDirname(resolved_address, install_root))
-    printStatus("deps", f"Checking sub-dependencies for {resolved_address}", "info")
+    if emit:
+        printStatus("deps", f"Checking sub-dependencies for {resolved_address}", "info")
     if not os.path.isfile(dep_path):
-        printStatus("info", "No sub-dependencies declared.", "muted")
+        if emit:
+            printStatus("info", "No sub-dependencies declared.", "muted")
         return
-    await getDep(dep_path, color=color, log=True, install_root=install_root, work_dir=work_dir)
+    await getDep(dep_path, color=color, emit=emit, install_root=install_root, work_dir=work_dir)
         
 def trust(ext_filename: str, ext_dir_path: str) -> None:
     ext_path: str = os.path.join(EXTENSIONS_DIR, ext_filename)
@@ -2152,6 +2158,18 @@ async def main() -> None:
             except (FileNotFoundError, RuntimeError, ValueError, OSError) as exc:
                 printDistroLocationError(address, exc)
                 sys.exit(1)
+        case "fetch":
+            if len(sys.argv) == 2:
+                printStatus("help", f"Usage: {COMMAND} fetch <address>", "warning")
+                sys.exit(1)
+            address: str = sys.argv[2]
+            temp_dir: str = tempfile.mkdtemp(prefix="hydrogen-fetch-")
+            work_dir: str = os.path.join(temp_dir, "work")
+            dist_dir: str = os.path.join(temp_dir, "dist")
+            result: Result = await installAsync(address, emit=False, install_root=dist_dir, work_dir=work_dir)
+            if not result.exit_code:
+                await installSubdependencies(address, emit=False)
+            print(os.path.join(os.path.abspath(dist_dir), getAddressInfo(address)["distro"]))
         case "view":
             if len(sys.argv) != 3:
                 printStatus("help", f"Usage: {COMMAND} view <address>", "warning")
@@ -2167,7 +2185,7 @@ async def main() -> None:
             project: str = sys.argv[2]
             address = sys.argv[3]
             install_root: str = os.path.join(project, "libraries", getAddressInfo(address)['author'])
-            result = await queueInstallToRoot(address, install_root, True)
+            result = await queueInstallToRoot(address, True, install_root, True)
             printResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
