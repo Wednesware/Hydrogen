@@ -1,6 +1,12 @@
-import sys, zipfile, shutil, os, json, subprocess, traceback, tarfile, asyncio, re, tempfile, platform, urllib, socket, inspect, urllib.request, urllib.error, logging
+import sys, zipfile, shutil, os, json, subprocess, traceback, tarfile, asyncio, re, tempfile, platform, urllib, socket, urllib.request, urllib.error, logging, base64, getpass, webbrowser
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from urllib.request import urlretrieve
+
+try:
+    import keyring  # type: ignore
+except Exception:  # pragma: no cover - optional credential store
+    keyring = None
 
 from .ww.mg26_11.config import getconf
 from .ww.mg26_11.filepath import FilePath
@@ -10,7 +16,7 @@ SOURCEGEN_VERSION: str = "26.5" # SHOULD NOT BE CHANGED
 
 NAME: str = "Hydrogen" # TODO
 DESCRIPTION: str = "Sourcegen-based Distrobase installer." # TODO
-VERSION: str = "26.2" # TODO
+VERSION: str = "26.3" # TODO
 COMMAND: str = f"h2" # TODO
 
 CLI_RESET: str = "\033[0m"
@@ -29,6 +35,7 @@ INTERNAL_WW_DIR: str = os.path.join(os.path.dirname(__file__), "ww")
 INTERNAL_TEMP_DIR: str = os.path.join(INTERNAL_WW_DIR, "temp")
 CONFIG_PATH: FilePath = FilePath(__file__) / ".." / "config.pyon"
 DISTRO_NOT_FOUND_TEXT: str = "Distribution not found"
+SUPPORT_EMAIL: str = "team@wednesware.org"
 DSTBS_DIR: str = {
     "linux": "/var/lib",
     "windows": "C:\\ProgramData\\Distrobase",
@@ -130,6 +137,14 @@ def printHelp() -> None:
     printCommand("updlibs <project>", "Reinstall all distributions in '<project>/libraries' from their exact installed addresses.")
     printCommand("registry <registry>", "Set your home registry which will be used in operations when a registry is not specified.")
     print()
+    printSection("User and account")
+    printCommand("user create <username> <password>", "Create a distro account for the specified username and password.")
+    printCommand("user view <username>", "Show details for a registered distro user.")
+    printCommand("user list", "List all registered distro users.")
+    printCommand("login <username> [password]", "Log in and securely store credentials locally for use when publishing.")
+    printCommand("logout", "Remove locally stored login credentials.")
+    printCommand("me", "Show the currently logged in user.")
+    print()
     printSection("Stage")
     printCommand("stage get <address>", "Stage a dependency install into ./ww.")
     printCommand("stage getlib <project> <address>", "Stage a library install into ./<project>/libraries/author.")
@@ -150,11 +165,11 @@ def printHelp() -> None:
     printCommand("stage execute", "Execute staged actions in exact order. Slower but guarantees order of operations.")
     printCommand("stage commit", "Execute staged installs/removals in batched mode. Faster but does not guarantee order of operations.")
     print()
-    print()
     printSection("Documentation")
     printCommand("readme [extension]", "Show the README for Hydrogen or an installed extension.")
     printCommand("license [extension]", "Show the license for Hydrogen or an installed extension.")
     printCommand("help", "Show this help message.")
+    printCommand("support", "Write a message and send it to the Wednesware support team.")
     print()
     printSection("Extensions")
     printCommand("list-ext", "List installed extensions and their local paths.")
@@ -212,12 +227,16 @@ def printResult(result: Result, color: bool = True) -> None:
     palette: dict[str, str] = {
         "info": CLI_INFO,
         "success": CLI_SUCCESS,
-        "error": CLI_ERROR,
+        "error": CLI_ERROR
     }
     prefix: str = palette.get(result.status, "") if color else ""
     label: str = labels.get(result.status, "info")
     lines: list[str] = list(result.lines) if result.lines else ([result.message] if result.message else [])
     for line in lines:
+        if line.startswith("Hint:"):
+            line = line.removeprefix("Hint:").strip()
+            label = "hint"
+            prefix = palette.get("info", "") if color else ""
         if prefix:
             print(f"{cli(f'[{label}]', prefix, bold=True)} {line}")
         else:
@@ -756,11 +775,11 @@ def parseStageLine(line: str) -> StageAction | None:
 
 def updateHomeRegistry(registry: str) -> None:
     config_data: dict = {}
-    if os.path.isfile(CONFIG_PATH):
-        with open(CONFIG_PATH) as config_file:
+    if os.path.isfile(str(CONFIG_PATH)):
+        with open(str(CONFIG_PATH)) as config_file:
             config_data = json.load(config_file)
     config_data["registry"] = registry
-    with open(CONFIG_PATH, "w") as config_file:
+    with open(str(CONFIG_PATH), "w") as config_file:
         json.dump(config_data, config_file, indent=4)
         config_file.write("\n")
 
@@ -1708,9 +1727,276 @@ def unloadLen() -> None:
     else:
         printStatus("info", "LEN is not loaded.", "muted")
         
+def getStoredAuth() -> tuple[str | None, str | None]:
+    username = os.environ.get("DISTROBASE_AUTH_USER")
+    if not username:
+        try:
+            username = getconf("auth_user", None, config_path=CONFIG_PATH)
+        except Exception:
+            username = None
+
+    if not username:
+        return None, None
+
+    password = os.environ.get("DISTROBASE_AUTH_PASSWORD")
+    if not password and keyring is not None:
+        try:
+            password = keyring.get_password("hydrogen-distrobase", username)
+        except Exception:
+            password = None
+    if not password:
+        password = _getFallbackPassword(username)
+
+    return (username, password) if username and password else (None, None)
+
+
+FALLBACK_AUTH_FILE: str = os.path.join(os.path.dirname(str(CONFIG_PATH)), ".hydrogen_auth")
+FALLBACK_AUTH_KEY_FILE: str = os.path.join(os.path.dirname(str(CONFIG_PATH)), ".hydrogen_auth_key")
+
+
+def _fallbackAuthKey() -> bytes:
+    """Load or create a local, file-permission-protected key used to obscure stored passwords."""
+    if os.path.isfile(FALLBACK_AUTH_KEY_FILE):
+        with open(FALLBACK_AUTH_KEY_FILE, "rb") as key_file:
+            key: bytes = key_file.read()
+        if key:
+            return key
+
+    key = os.urandom(32)
+    with open(FALLBACK_AUTH_KEY_FILE, "wb") as key_file:
+        key_file.write(key)
+    try:
+        os.chmod(FALLBACK_AUTH_KEY_FILE, 0o600)
+    except OSError:
+        pass
+    return key
+
+
+def _xorBytes(data: bytes, key: bytes) -> bytes:
+    return bytes(byte ^ key[i % len(key)] for i, byte in enumerate(data))
+
+
+def _setFallbackPassword(username: str, password: str) -> None:
+    key: bytes = _fallbackAuthKey()
+    obscured: str = base64.b64encode(_xorBytes(password.encode("utf-8"), key)).decode("ascii")
+    creds: dict = {}
+    if os.path.isfile(FALLBACK_AUTH_FILE):
+        try:
+            with open(FALLBACK_AUTH_FILE) as creds_file:
+                creds = json.load(creds_file)
+        except Exception:
+            creds = {}
+    creds[username] = obscured
+    with open(FALLBACK_AUTH_FILE, "w") as creds_file:
+        json.dump(creds, creds_file)
+    try:
+        os.chmod(FALLBACK_AUTH_FILE, 0o600)
+    except OSError:
+        pass
+
+
+def _getFallbackPassword(username: str) -> str | None:
+    if not os.path.isfile(FALLBACK_AUTH_FILE):
+        return None
+    try:
+        with open(FALLBACK_AUTH_FILE) as creds_file:
+            creds: dict = json.load(creds_file)
+        obscured = creds.get(username)
+        if not obscured:
+            return None
+        return _xorBytes(base64.b64decode(obscured), _fallbackAuthKey()).decode("utf-8")
+    except Exception:
+        return None
+
+
+def _deleteFallbackPassword(username: str) -> None:
+    if not os.path.isfile(FALLBACK_AUTH_FILE):
+        return
+    try:
+        with open(FALLBACK_AUTH_FILE) as creds_file:
+            creds: dict = json.load(creds_file)
+        creds.pop(username, None)
+        with open(FALLBACK_AUTH_FILE, "w") as creds_file:
+            json.dump(creds, creds_file)
+    except Exception:
+        pass
+
+
+def _saveConfig(mutate) -> None:
+    config_data: dict = {}
+    if os.path.isfile(str(CONFIG_PATH)):
+        with open(str(CONFIG_PATH)) as config_file:
+            config_data = json.load(config_file)
+    mutate(config_data)
+    with open(str(CONFIG_PATH), "w") as config_file:
+        json.dump(config_data, config_file, indent=4)
+        config_file.write("\n")
+
+
+async def loginUser(username: str, password: str | None) -> Result:
+    username = username.strip()
+    if not username:
+        return Result(
+            status="error",
+            success=False,
+            lines=["A username is required."],
+            message="A username is required.",
+            exit_code=1,
+        )
+
+    if not password:
+        try:
+            password = getpass.getpass("Password: ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return Result(
+                status="error",
+                success=False,
+                lines=["Login cancelled."],
+                message="Login cancelled.",
+                exit_code=1,
+            )
+
+    if not password:
+        return Result(
+            status="error",
+            success=False,
+            lines=["A password is required."],
+            message="A password is required.",
+            exit_code=1,
+        )
+
+    lines: list[str] = []
+    if keyring is not None:
+        try:
+            keyring.set_password("hydrogen-distrobase", username, password)
+        except Exception as exc:
+            return Result(
+                status="error",
+                success=False,
+                lines=[f"Could not store credentials securely: {exc}"],
+                message=f"Could not store credentials securely: {exc}",
+                exit_code=1,
+            )
+    else:
+        _setFallbackPassword(username, password)
+        hint = True
+        lines.append(
+            "Hint: install the 'keyring' package (`pip install keyring`) to store credentials in your OS's secure "
+            "credential store instead of a locally protected file."
+        )
+
+    def mutate(config_data: dict) -> None:
+        config_data["auth_user"] = username
+        config_data.pop("auth_password", None)
+
+    _saveConfig(mutate)
+
+    lines.insert(0, f"Logged in as '{username}'.")
+    return Result(
+        status="success",
+        success=True,
+        lines=lines,
+        message=f"Logged in as '{username}'.",
+        exit_code=0,
+    )
+
+
+def logoutUser() -> Result:
+    username, _ = getStoredAuth()
+    if not username:
+        return Result(
+            status="info",
+            success=True,
+            lines=["Not logged in."],
+            message="Not logged in.",
+            exit_code=0,
+        )
+
+    if keyring is not None:
+        try:
+            keyring.delete_password("hydrogen-distrobase", username)
+        except Exception:
+            pass
+    _deleteFallbackPassword(username)
+
+    def mutate(config_data: dict) -> None:
+        config_data.pop("auth_user", None)
+        config_data.pop("auth_password", None)
+
+    _saveConfig(mutate)
+
+    return Result(
+        status="success",
+        success=True,
+        lines=[f"Logged out of '{username}'."],
+        message=f"Logged out of '{username}'.",
+        exit_code=0,
+    )
+
+
+def whoami() -> Result:
+    username, password = getStoredAuth()
+    if not username or not password:
+        return Result(
+            status="info",
+            success=True,
+            lines=["Not logged in."],
+            message="Not logged in.",
+            exit_code=1,
+        )
+
+    registry: str = getconf("registry", "wednesware.org", config_path=CONFIG_PATH)
+    return Result(
+        status="success",
+        success=True,
+        lines=[f"Logged in as '{username}' (home registry: '{registry}')."],
+        message=f"Logged in as '{username}'.",
+        exit_code=0,
+    )
+
+
+def supportCommand() -> None:
+    printSection("Support")
+    print("Describe your issue or feedback in a single line:")
+    try:
+        message: str = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        printStatus("cancel", "Support message cancelled.", "warning")
+        return
+
+    if not message:
+        printStatus("cancel", "No message entered.", "warning")
+        return
+
+    try:
+        confirm: str = input(f"Send this message to {SUPPORT_EMAIL}? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        printStatus("cancel", "Support message cancelled.", "warning")
+        return
+
+    if confirm not in ("y", "yes"):
+        printStatus("cancel", "Support message not sent.", "warning")
+        return
+
+    mailto_url: str = (
+        f"mailto:{SUPPORT_EMAIL}"
+        f"?subject={urllib.parse.quote(f'{NAME} Support Request')}"
+        f"&body={urllib.parse.quote(message)}"
+    )
+    if webbrowser.open(mailto_url):
+        printStatus("done", "Opened your email client to send the message.", "success")
+    else:
+        printStatus("fail", f"Could not open an email client. Please email {SUPPORT_EMAIL} manually.", "error")
+
+
 async def publishDistro(
     project_path: str,
     address: str,
+    username: str | None = None,
+    password: str | None = None,
 ) -> Result:
 
     try:
@@ -1966,19 +2252,28 @@ async def publishDistro(
                 ).encode()
             )
 
+            username = username or getStoredAuth()[0]
+            password = password or getStoredAuth()[1]
+            headers = {
+                "Content-Type": (
+                    "multipart/form-data; "
+                    f"boundary={boundary}"
+                ),
+                "Content-Length": str(
+                    len(body)
+                ),
+            }
+            if username and password:
+                auth_value = base64.b64encode(
+                    f"{username}:{password}".encode("utf-8")
+                ).decode("ascii")
+                headers["Authorization"] = f"Basic {auth_value}"
+
             request = urllib.request.Request(
                 url,
                 data=bytes(body),
                 method="POST",
-                headers={
-                    "Content-Type": (
-                        "multipart/form-data; "
-                        f"boundary={boundary}"
-                    ),
-                    "Content-Length": str(
-                        len(body)
-                    ),
-                },
+                headers=headers,
             )
 
             printStatus(
@@ -2080,7 +2375,6 @@ async def publishDistro(
         )
 
     except urllib.error.URLError as exc:
-
         return Result(
             status="error",
             success=False,
@@ -2094,7 +2388,6 @@ async def publishDistro(
         )
 
     except Exception as exc:
-
         return Result(
             status="error",
             success=False,
@@ -2106,6 +2399,190 @@ async def publishDistro(
             ),
             exit_code=1,
         )
+
+async def registerUser(username: str, password: str, registry: str | None = None) -> Result:
+    registry = (registry or getconf("registry", "wednesware.org", config_path=CONFIG_PATH)).strip()
+    if not username or not password:
+        return Result(
+            status="error",
+            success=False,
+            lines=["A username and password are required."],
+            message="A username and password are required.",
+            exit_code=1,
+        )
+
+    base_url = registryBaseUrl(registry)
+    req = urllib.request.Request(
+        f"{base_url}/v1/users",
+        data=json.dumps({"username": username, "password": password}).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            payload = json.load(response)
+        config_data: dict = {}
+        if os.path.isfile(str(CONFIG_PATH)):
+            with open(str(CONFIG_PATH)) as config_file:
+                config_data = json.load(config_file)
+        config_data["auth_user"] = username
+        config_data.pop("auth_password", None)
+
+        if keyring is not None:
+            try:
+                keyring.set_password("hydrogen-distrobase", username, password)
+            except Exception as exc:
+                return Result(
+                    status="error",
+                    success=False,
+                    lines=[f"Could not store credentials securely: {exc}"],
+                    message=f"Could not store credentials securely: {exc}",
+                    exit_code=1,
+                )
+
+        with open(str(CONFIG_PATH), "w") as config_file:
+            json.dump(config_data, config_file, indent=4)
+            config_file.write("\n")
+        return Result(
+            status="success",
+            success=True,
+            lines=[f"Created Distrobase account for '{username}' on '{registry}'."],
+            message=f"Created Distrobase account for '{username}' on '{registry}'.",
+            exit_code=0,
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return Result(
+            status="error",
+            success=False,
+            lines=[f"Registry rejected user creation: {detail}"],
+            message=f"Registry rejected user creation: {detail}",
+            exit_code=1,
+        )
+    except urllib.error.URLError as exc:
+        return Result(
+            status="error",
+            success=False,
+            lines=[f"Could not reach registry: {exc}"],
+            message=f"Could not reach registry: {exc}",
+            exit_code=1,
+        )
+
+
+async def viewUser(username: str, registry: str | None = None) -> Result:
+    registry = (registry or getconf("registry", "wednesware.org", config_path=CONFIG_PATH)).strip()
+    if not username or not username.strip():
+        return Result(
+            status="error",
+            success=False,
+            lines=["A username is required."],
+            message="A username is required.",
+            exit_code=1,
+        )
+
+    base_url = registryBaseUrl(registry)
+    req = urllib.request.Request(
+        f"{base_url}/v1/users/{urllib.parse.quote(username.strip())}",
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            payload = json.load(response)
+        created_at = payload.get("createdAt", None)
+        if created_at:
+            dt: datetime = datetime.fromisoformat(created_at)
+            seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+
+            time_str: str = dt.strftime("%H:%M, %d %B %Y") if seconds < 86400 else dt.strftime("%d %B %Y")
+
+            if seconds < 60:
+                time_since: str = f"{int(seconds)} seconds"
+            elif seconds < 3600:
+                time_since: str = f"{int(seconds // 60)} minutes"
+            elif seconds < 86400:
+                time_since: str = f"{int(seconds // 3600)} hours"
+            elif seconds < 2592000:
+                time_since: str = f"{int(seconds // 86400)} days"
+            elif seconds < 31536000:
+                time_since: str = f"{int(seconds // 2592000)} months"
+            else:
+                time_since: str = f"{int(seconds // 31536000)} years"
+
+            lines = [
+                f"User {payload.get('username', username)} - member since {time_str} ({time_since})",
+            ]
+        else:
+            lines = [
+                f"User {payload.get('username', username)} (account exists - unknown join date)",
+            ]
+        return Result(
+            status="success",
+            success=True,
+            lines=lines,
+            message=f"User '{payload.get('username', username)}' found.",
+            exit_code=0,
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return Result(
+            status="error",
+            success=False,
+            lines=[f"Could not find user '{username}': {detail}"],
+            message=f"Could not find user '{username}': {detail}",
+            exit_code=1,
+        )
+    except urllib.error.URLError as exc:
+        return Result(
+            status="error",
+            success=False,
+            lines=[f"Could not reach registry: {exc}"],
+            message=f"Could not reach registry: {exc}",
+            exit_code=1,
+        )
+
+
+async def listUsers(registry: str | None = None) -> Result:
+    registry = (registry or getconf("registry", "wednesware.org", config_path=CONFIG_PATH)).strip()
+    base_url = registryBaseUrl(registry)
+    req = urllib.request.Request(
+        f"{base_url}/v1/users",
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            payload = json.load(response)
+        users = payload if isinstance(payload, list) else []
+        lines = [f"{item.get('username', '<unknown>')}" for item in users]
+        if not lines:
+            lines = ["No registered users."]
+        return Result(
+            status="success",
+            success=True,
+            lines=lines,
+            message=f"Found {len(users)} registered user(s).",
+            exit_code=0,
+        )
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        return Result(
+            status="error",
+            success=False,
+            lines=[f"Could not list users: {detail}"],
+            message=f"Could not list users: {detail}",
+            exit_code=1,
+        )
+    except urllib.error.URLError as exc:
+        return Result(
+            status="error",
+            success=False,
+            lines=[f"Could not reach registry: {exc}"],
+            message=f"Could not reach registry: {exc}",
+            exit_code=1,
+        )
+
 
 async def main() -> None:
     if len(sys.argv) == 1:
@@ -2129,11 +2606,11 @@ async def main() -> None:
             registry_value: str = sys.argv[2].strip()
             try:
                 config_data: dict = {}
-                if os.path.isfile(CONFIG_PATH):
-                    with open(CONFIG_PATH) as config_file:
+                if os.path.isfile(str(CONFIG_PATH)):
+                    with open(str(CONFIG_PATH)) as config_file:
                         config_data = json.load(config_file)
                 config_data["registry"] = registry_value
-                with open(CONFIG_PATH, "w") as config_file:
+                with open(str(CONFIG_PATH), "w") as config_file:
                     json.dump(config_data, config_file, indent=4)
                     config_file.write("\n")
                 printStatus("done", f"Home registry set to '{registry_value}'.", "success")
@@ -2193,9 +2670,46 @@ async def main() -> None:
             if len(sys.argv) < 4:
                 printStatus("help", f"Usage: {COMMAND} publish <project_directory> <address>", "warning")
                 sys.exit(1)
-            result = await publishDistro(sys.argv[2],sys.argv[3])
+            result = await publishDistro(sys.argv[2], sys.argv[3])
             printResult(result)
-
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        case "user":
+            if len(sys.argv) == 2:
+                printStatus("help", f"Usage: {COMMAND} user create|view|list ...", "warning")
+                sys.exit(1)
+            if sys.argv[2] == "create":
+                if len(sys.argv) != 5:
+                    printStatus("help", f"Usage: {COMMAND} user create <username> <password>", "warning")
+                    sys.exit(1)
+                result = await registerUser(sys.argv[3], sys.argv[4])
+            elif sys.argv[2] == "view":
+                if len(sys.argv) != 4:
+                    printStatus("help", f"Usage: {COMMAND} user view <username>", "warning")
+                    sys.exit(1)
+                result = await viewUser(sys.argv[3])
+            elif sys.argv[2] == "list":
+                result = await listUsers()
+            elif sys.argv[2] == "me":
+                result = whoami()
+            else:
+                printStatus("help", f"Usage: {COMMAND} user create <username> <password> | {COMMAND} user view <username> | {COMMAND} user list", "warning")
+                sys.exit(1)
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        case "login":
+            if len(sys.argv) not in (3, 4):
+                printStatus("help", f"Usage: {COMMAND} login <username> [password]", "warning")
+                sys.exit(1)
+            login_password: str | None = sys.argv[3] if len(sys.argv) == 4 else None
+            result = await loginUser(sys.argv[2], login_password)
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        case "logout":
+            result = logoutUser()
+            printResult(result)
             if result.exit_code:
                 raise SystemExit(result.exit_code)
         case "rm":
@@ -2335,6 +2849,8 @@ async def main() -> None:
             printHelp()
             print()
             printExtensionCommands()
+        case "support":
+            supportCommand()
         case _:
             for ext_filename2 in [item for item in os.listdir(EXTENSIONS_DIR) if item.endswith(".n2x") or item.endswith(".n2xp")]:
                 ext_path2: str = os.path.join(EXTENSIONS_DIR, ext_filename2)

@@ -44,6 +44,12 @@ Sourcegen-based Distrobase installer.
 * `h2 forcegetdep [path]` - Install all dependencies, regardless of whether they are already installed from a .hydrodep file, including nested ones, forcing reinstallation of all dependencies.
 * `h2 updlibs <project>` - Reinstall all distributions in '<project>/libraries' from their exact installed addresses.
 * `h2 registry <registry>` - Set your home registry which will be used in operations when a registry is not specified.
+* `h2 user create <username> <password>` - Create a distro account on the configured registry.
+* `h2 user view <username>` - Show details for a registered distro user.
+* `h2 user list` - List all registered distro users.
+* `h2 user me` - Show the currently logged in user.
+* `h2 login <username> [password]` - Log in and securely store credentials locally for use when publishing. Uses your OS keyring if the optional `keyring` package is installed, otherwise falls back to a locally protected file. Omit the password to be prompted for it securely.
+* `h2 logout` - Remove locally stored login credentials.
 * `h2 stage get <address>` - Stage a dependency install into ./ww.
 * `h2 stage getlib <project> <address>` - Stage a library install into ./<project>/libraries/author.
 * `h2 stage adddep <address>` - Stage adding one dependency line to ./.hydrodep.
@@ -65,6 +71,7 @@ Sourcegen-based Distrobase installer.
 * `h2 readme [extension]` - Show the README for Hydrogen or an installed extension.
 * `h2 license [extension]` - Show the license for Hydrogen or an installed extension.
 * `h2 help` - Show this help message.
+* `h2 support` - Write a message and send it to the Wednesware support team.
 * `h2 list-ext` - List installed extensions and their local paths.
 * `h2 trust-ext <extension>` - Trust an extension so it can run without confirmation.
 * `h2 untrust-ext <extension>` - Remove trust for an extension.
