@@ -1,82 +1,172 @@
-# Wednesware Hydrogen
+[![Wednesware](wednesware.png)](https://wednesware.org)
+
+# Hydrogen
 
 Sourcegen-based Distrobase installer.
 
-## Installation methods:
+## Installation
 
-### From PyPI via pipx (recommended, global install, run with `h2`):
-* `pipx install wwh`
+### With `pip`
+    
+> `pip install wwh`
 
-### From PyPI via pip (virtual environment or global install, run with `h2`):
-* `pip install wwh`
-* Note: You may need to create a virtual environment for this method first on some machines. [Learn how to do this here.](https://docs.python.org/3/library/venv.html)
+### With `pipx`
 
-### From GitHub via Nitrogen (local install, run with `python -m ww.h`):
-* `n2 get hydrogen`
+> `pipx install wwh`
 
-### From GitHub via terminal (local install, run with `python -m hydrogen`):
-* `git clone https://github.com/Wednesware/Hydrogen.git hydrogen`
+### With Nitrogen (library only)
 
-### From Github via browser (local install, run with `python -m hydrogen`):
-* [Click here to install the latest Hydrogen release as a zip file](https://github.com/Wednesware/Hydrogen/releases/latest/download/hydrogen.zip) [or click here to browse releases](https://github.com/Wednesware/Hydrogen/releases).
-* Unpack using `bsdtar -xf hydrogen.zip`
+> `n2 get hydrogen`
 
-## Upgrade methods:
+### With Nitrogen (library and command)
 
-### From PyPI via pipx
-* `pipx upgrade wwh`
+> `n2 get hydrogen && n2 install hydrogen`
 
-### From PyPI via pip
-* `pip install wwh --upgrade`
+## Dependencies
 
-## Usage:
+- Python 3.12+
+- Optional: Keyring (`pip install keyring`)
 
-### Commands
+# Commands
 
-* `h2 get <address>` - Download a distribution from an address.
-* `h2 view <address>` - View information about a distribution.
-* `h2 url <address>` - Get the URL of a tar.gz artifact via an address.
-* `h2 fetch <address>` - Download a distribution to a temporary directory and print the extracted path.
-* `h2 getlib <project> <address>` - Download a distribution into '<project>/libraries/author'.
-* `h2 publish <project> <address>` - Publish a distribution from a project directory to a registry.
-* `h2 rm <address>` - Delete one distribution or all installed distributions.
-* `h2 getdep [path]` - Install missing dependencies from a .hydrodep file, including nested ones.
-* `h2 forcegetdep [path]` - Install all dependencies, regardless of whether they are already installed from a .hydrodep file, including nested ones, forcing reinstallation of all dependencies.
-* `h2 updlibs <project>` - Reinstall all distributions in '<project>/libraries' from their exact installed addresses.
-* `h2 registry <registry>` - Set your home registry which will be used in operations when a registry is not specified.
-* `h2 user create <username> <password>` - Create a distro account on the configured registry.
-* `h2 user view <username>` - Show details for a registered distro user.
-* `h2 user list` - List all registered distro users.
-* `h2 user me` - Show the currently logged in user.
-* `h2 login <username> [password]` - Log in and securely store credentials locally for use when publishing. Uses your OS keyring if the optional `keyring` package is installed, otherwise falls back to a locally protected file. Omit the password to be prompted for it securely.
-* `h2 logout` - Remove locally stored login credentials.
-* `h2 stage get <address>` - Stage a dependency install into ./ww.
-* `h2 stage getlib <project> <address>` - Stage a library install into ./<project>/libraries/author.
-* `h2 stage adddep <address>` - Stage adding one dependency line to ./.hydrodep.
-* `h2 stage rmdep <address>` - Stage removing one dependency line from ./.hydrodep.
-* `h2 stage getdep [target]` - Stage running getdep at ./<target>.
-* `h2 stage forcegetdep [target]` - Stage running forcegetdep at ./<target>.
-* `h2 stage updlibs [target]` - Stage running updlibs at ./<target>.
-* `h2 stage rm <address>` - Stage dependency removal from ./ww.
-* `h2 stage rmlib <project> <address>` - Stage library removal from ./<project>/libraries/author.
-* `h2 stage publish <project> <address>` - Stage publishing a project distribution to a registry.
-* `h2 stage registry <registry>` - Stage setting the home registry.
-* `h2 stage cmd <command>` - Stage a shell command to run during stage execute/commit.
-* `h2 stage getinternal <address>` - Stage a dependency install into hydrogen/ww.
-* `h2 stage rminternal <address>` - Stage dependency removal from hydrogen/ww.
-* `h2 stage getdepinternal [target]` - Stage running getdep against hydrogen/ww at ./<target>.
-* `h2 stage cancel [subcommand|last] [args]` - Cancel one staged line, the last line, or the full stage.
-* `h2 stage execute` - Execute staged actions in exact order. Slower but guarantees order of operations.
-* `h2 stage commit` - Execute staged installs/removals in batched mode. Faster but does not guarantee order of operations.
-* `h2 readme [extension]` - Show the README for Hydrogen or an installed extension.
-* `h2 license [extension]` - Show the license for Hydrogen or an installed extension.
-* `h2 help` - Show this help message.
-* `h2 support` - Write a message and send it to the Wednesware support team.
-* `h2 list-ext` - List installed extensions and their local paths.
-* `h2 trust-ext <extension>` - Trust an extension so it can run without confirmation.
-* `h2 untrust-ext <extension>` - Remove trust for an extension.
-* `h2 install-ext <extension>` - Install an extension from LEN.
-* `h2 uninstall-ext <extension>` - Remove an installed extension.
-* `h2 list-len` - List available extensions in LEN.
-* `h2 load-len` - Clone the LEN repository locally.
-* `h2 unload-len` - Remove the local LEN checkout.
+## Distributions
+
+Hydrogen understands Distrobase addresses, optionally including an author, a registry, and a release version. When the registry is omitted, Hydrogen uses the configured home registry (`wednesware.org` by default). When the version is omitted, Hydrogen selects `latest`.
+
+### `view <address>`
+
+Show distribution release metadata and available artifacts, including sizes and SHA-256 hashes when supplied by the registry.
+
+> `h2 view author.distribution@wednesware.org=1.0`
+
+### `url <address>`
+
+Resolve the URL of a `.tar.gz` or `.tgz` artifact for a distribution, or the path to the matching archive in a local registry.
+
+> `h2 url author.distribution@wednesware.org=1.0`
+
+### `fetch <address>`
+
+Download and extract a distribution into a temporary directory, then print the installed directory path. Online artifacts and local releases use Hydrogen's Distrobase address resolution and Sourcegen's installation engine.
+
+> `h2 fetch author.distribution@wednesware.org=1.0`
+
+### `publish <project> <address>`
+
+Package a project and publish a versioned distribution to a Distrobase registry. Publishing a remote release requires appropriate registry credentials; local registry publishing uses a filesystem path.
+
+> `h2 publish ./myproject author.distribution@wednesware.org=1.0`
+
+### `registry <registry>`
+
+Set the default home registry used when a distribution address does not explicitly name one.
+
+> `h2 registry wednesware.org`
+
+## Users and accounts
+
+### `user create <username> <password>`
+
+Register a user with the configured Distrobase registry.
+
+> `h2 user create exampleuser examplepassword`
+
+### `user view <username>`
+
+Display information about a registered user.
+
+> `h2 user view exampleuser`
+
+### `user list`
+
+List registered users in the registry.
+
+> `h2 user list`
+
+### `user me`
+
+Show the locally authenticated user.
+
+> `h2 user me`
+
+### `user login <username> [password]`
+
+Authenticate against the registry and save credentials for publishing. Omitting the password allows Hydrogen to prompt for it. The optional `keyring` package enables credential storage through the OS keyring.
+
+> `h2 user login exampleuser`
+
+### `user logout`
+
+Remove locally stored authentication information.
+
+> `h2 user logout`
+
+## Documentation and support
+
+### `help`
+
+Display Hydrogen's supported command reference.
+
+> `h2 help`
+
+### `support`
+
+Compose a message to Wednesware support.
+
+> `h2 support`
+
+# Definitions
+
+## Distrobase address
+
+A remote distribution address follows the pattern `author.distribution@registry=version`. The version and registry may be omitted where a default is available.
+
+> `example.project@wednesware.org=1.0`
+
+Local registries use `#` instead of `@` and accept a filesystem location.
+
+> `example.project#/path/to/registry=1.0`
+
+## `hydrogen`
+
+Hydrogen is also a Python module. Its public-facing Distrobase helpers include:
+
+### `hydrogen.getAddressInfo(address: str) -> dict`
+
+Parse a distribution address into its author, distribution name, registry, version, and registry type.
+
+> `getAddressInfo("example.project@wednesware.org=1.0")`
+
+### `hydrogen.findDistroLocation(address: str) -> str`
+
+Resolve a distribution to the URL or local archive path for its release artifact.
+
+> `findDistroLocation("example.project@wednesware.org=1.0")`
+
+### `hydrogen.viewDistro(address: str) -> Result`
+
+Retrieve distribution metadata in a structured result.
+
+> `viewDistro("example.project@wednesware.org=1.0")`
+
+### `hydrogen.fetchDistro(address: str) -> str` *(async)*
+
+Fetch and extract a distribution through Sourcegen's internal caching engine, returning its filesystem path.
+
+> `path = await fetchDistro("example.project@wednesware.org=1.0")`
+
+### `hydrogen.publishDistro(project_path: str, address: str, username: str | None = None, password: str | None = None) -> Result` *(async)*
+
+Build and publish a versioned distribution.
+
+> `result = await publishDistro("./myproject", "example.project@wednesware.org=1.0")`
+
+### `hydrogen.entrypoint() -> None`
+
+Run Hydrogen's command-line interface.
+
+> `entrypoint()`
+
+## Relationship with Sourcegen
+
+Hydrogen retains its Distrobase-specific functionality while using the newer Sourcegen core for package retrieval and caching. Sourcegen's generic `get`, `rm`, `install`, `uninstall`, `list`, `cache`, and documentation commands are **not** exposed as Hydrogen commands. Legacy staging, extension and dependency-file commands are also excluded.
