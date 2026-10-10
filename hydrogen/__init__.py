@@ -1,3 +1,5 @@
+# Hydrogen — Wednesware Distrobase client, derived from Sourcegen 26.66.
+# Sourcegen powers package fetching, caching and optional pipx installation.
 import sys, os, json, asyncio, re, shutil, zipfile, tarfile, tempfile, platform, urllib, urllib.request, urllib.error, logging, base64, getpass, webbrowser, socket, pathlib, subprocess, traceback, importlib.util, threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -10,7 +12,7 @@ except ImportError:
 SOURCEGEN_VERSION = "26.66"  # Upstream Sourcegen version (not Hydrogen's version)
 NAME = "Hydrogen"
 DESCRIPTION = "Wednesware Distrobase registry client and distribution installer."
-VERSION = "26.4"  # Hydrogen release; update when publishing a new release
+VERSION = "26.5"  # Hydrogen release; update when publishing a new release
 COMMAND = "h2"
 INTERNAL_PACKAGES_DIR = os.path.join(os.path.dirname(__file__), "packages")
 INTERNAL_TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
@@ -27,7 +29,7 @@ CLI_WARNING = "\033[93m"
 CLI_ERROR = "\033[91m"
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.pyon")
 DISTRO_NOT_FOUND_TEXT = "Distribution not found"
-SUPPORT_EMAIL = "team@wednesware.org"
+SUPPORT_EMAIL = "support@wednesware.org"
 DSTBS_DIR = {"linux": "/var/lib", "windows": r"C:\ProgramData\Distrobase", "darwin": "/Library/Application Support/Distrobase"}.get(platform.system().lower(), os.path.expanduser("~/.distrobase"))
 logger = logging.getLogger(__name__)
 running_installs = {}
@@ -43,203 +45,108 @@ class SourcegenDependencyError(RuntimeError):
     pass
 
 def _read_raw_sourcepkg(path: str) -> dict:
-
     pkg_dir = os.path.abspath(path)
-
     if not os.path.isdir(pkg_dir):
-
         raise ValueError(f"Only directories can be installed: {path}")
-
     pkg_file = os.path.join(pkg_dir, ".sourcepkg")
-
     if not os.path.isfile(pkg_file):
-
         raise ValueError(f"Only package directories with a JSON .sourcepkg file can be installed: {path}")
-
     try:
-
         with open(pkg_file, "r", encoding="utf-8") as handle:
-
             metadata = json.load(handle)
-
     except json.JSONDecodeError as exc:
-
         raise ValueError(f".sourcepkg is not valid JSON: {pkg_file}") from exc
-
     if not isinstance(metadata, dict):
-
         raise ValueError(f".sourcepkg must contain a JSON object: {pkg_file}")
-
     return dict(metadata)
 
-
 def _load_sourcepkg(path: str) -> dict:
-
     metadata = _read_raw_sourcepkg(path)
-
     metadata.pop("dependency", None)
-
     metadata.pop("name", None)
-
     metadata.pop("command", None)
-
     return metadata
 
-
 def _resolve_sourcepkg_entry(path: str, metadata: dict) -> str:
-
     entry = metadata.get("entry") or metadata.get("main") or metadata.get("script")
-
     if entry:
-
         target = os.path.join(path, entry)
-
         if os.path.isfile(target):
-
             return target
-
     for candidate in ("__main__.py", "main.py", "app.py", "run.py"):
-
         target = os.path.join(path, candidate)
-
         if os.path.isfile(target):
-
             return target
-
     raise ValueError(f"No valid entry script found in package directory '{path}'")
 
-
 def _as_path_list(root: str) -> list[str]:
-
     root_abs = os.path.abspath(root)
-
     parent_abs = os.path.dirname(root_abs)
-
     entries: list[str] = []
-
     for candidate in (parent_abs, root_abs):
-
         if candidate and candidate not in entries:
-
             entries.append(candidate)
-
     for relative in ("packages", "libraries", os.path.join("libraries", "packages")):
-
         candidate = os.path.join(root_abs, relative)
-
         if os.path.isdir(candidate) and candidate not in entries:
-
             entries.append(candidate)
-
     for relative in ("packages", "libraries", os.path.join("libraries", "packages")):
-
         candidate = os.path.join(parent_abs, relative)
-
         if os.path.isdir(candidate) and candidate not in entries:
-
             entries.append(candidate)
-
     return entries
 
-
 def _module_name_from_root(root: str) -> str | None:
-
     package_init = os.path.join(root, "__init__.py")
-
     if os.path.isfile(package_init):
-
         package_name = os.path.basename(root)
-
         normalized = package_name.replace("-", "_").replace(".", "_")
-
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", normalized):
-
             return normalized
-
     return None
 
-
 def _sanitize_python_name(value: str) -> str:
-
     sanitized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
-
     sanitized = sanitized.strip("-_.")
-
     return sanitized or "sourcegen-app"
 
-
 def _toml_list(values: object) -> str:
-
     if values is None:
-
         return "[]"
-
     if isinstance(values, str):
-
         values = [values]
-
     normalized = [str(item).strip() for item in values if str(item).strip()]
-
     if not normalized:
-
         return "[]"
-
     return ", ".join(json.dumps(item) for item in normalized)
 
-
 def _dependency_list(values: object | None, *, include_installer: bool = False) -> list[str]:
-
     if values is None:
-
         values = []
-
     if isinstance(values, str):
-
         values = [values]
-
     normalized: list[str] = []
-
     seen: set[str] = set()
-
     for item in values:
-
         candidate = str(item).strip()
-
         if not candidate:
-
             continue
-
         key = candidate.lower()
-
         if key in seen:
-
             continue
-
         seen.add(key)
-
         normalized.append(candidate)
-
     if include_installer and INSTALLER_PACKAGE_DEPENDENCY:
-
         nitro_key = INSTALLER_PACKAGE_DEPENDENCY
-
         if not any(item.lower() == nitro_key for item in normalized):
-
             normalized.insert(0, nitro_key)
-
     return normalized
 
-
 def _build_entry_wrapper(entry: str, pkg_dir: str) -> str:
-
     entry_value = entry.replace("\\", "/")
-
     pkg_root = os.path.abspath(pkg_dir)
-
     package_name = os.path.basename(pkg_root).replace("-", "_").replace(".", "_") or "sourcegen_app"
-
     module_path = os.path.join(pkg_root, "__main__.py") if os.path.isfile(os.path.join(pkg_root, "__main__.py")) else os.path.join(pkg_root, "main.py")
-
     wrapper = f"""
 
 import os
@@ -247,7 +154,6 @@ import os
 import runpy
 
 import sys
-
 
 ROOT = {pkg_root!r}
 
@@ -257,621 +163,318 @@ PACKAGE_NAME = {package_name!r}
 
 MODULE_PATH = {module_path!r}
 
-
 def main() -> None:
-
     entry_path = os.path.join(ROOT, ENTRY)
-
     if os.path.isfile(entry_path):
-
         if os.path.basename(entry_path) == "__main__.py" and os.path.isfile(os.path.join(ROOT, "__init__.py")):
-
             sys.path.insert(0, os.path.dirname(ROOT))
-
             runpy.run_module(PACKAGE_NAME, run_name="__main__")
-
             return
-
         runpy.run_path(entry_path, run_name="__main__")
-
         return
-
     if os.path.isfile(MODULE_PATH):
-
         sys.path.insert(0, os.path.dirname(ROOT))
-
         runpy.run_module(PACKAGE_NAME, run_name="__main__")
-
         return
-
     raise FileNotFoundError(f"No entry script found for package at {{ROOT!r}}")
 
 """
-
     return wrapper
 
-
 def _infer_package_metadata(pkg_dir: str, cmd_name: str | None = None, entry: str | None = None) -> dict:
-
     pkg_name = os.path.basename(os.path.abspath(pkg_dir)) or "sourcegen-app"
-
     resolved_entry = entry or next((candidate for candidate in ("__main__.py", "main.py", "app.py", "run.py") if os.path.isfile(os.path.join(pkg_dir, candidate))), None)
-
     return {
-
         "name": cmd_name or pkg_name,
-
         "command": cmd_name or pkg_name,
-
         "entry": resolved_entry,
-
         "version": "0.1.0",
-
         "description": f"Package {pkg_name}",
-
         "requires-python": ">=3.12",
-
     }
-
 
 def _resolve_cached_publication_entry(publication_dir: str, subpath: str | None = None) -> str:
-
     if subpath:
-
         cleaned = subpath.replace("\\", "/").strip("/")
-
         if cleaned.endswith(".py"):
-
             candidate = os.path.join(publication_dir, *cleaned.split("/"))
-
             if os.path.isfile(candidate):
-
                 return candidate
-
         pieces = [part for part in cleaned.split("/") if part]
-
         if pieces:
-
             candidate = os.path.join(publication_dir, *pieces)
-
             if os.path.isfile(candidate):
-
                 return candidate
-
             package_candidate = os.path.join(candidate, "__main__.py")
-
             if os.path.isfile(package_candidate):
-
                 return package_candidate
-
             file_candidate = candidate + ".py"
-
             if os.path.isfile(file_candidate):
-
                 return file_candidate
-
     candidates = [
-
         os.path.join(publication_dir, "__main__.py"),
-
         os.path.join(publication_dir, "main.py"),
-
         os.path.join(publication_dir, "app.py"),
-
         os.path.join(publication_dir, "run.py"),
-
     ]
-
     for candidate in candidates:
-
         if os.path.isfile(candidate):
-
             return candidate
-
     raise ValueError(f"No executable entry point was found in cached publication '{publication_dir}'.")
 
-
 def _write_pyproject_toml(pkg_dir: str, cmd_name: str, metadata: dict | None = None) -> str:
-
     metadata = dict(metadata or _infer_package_metadata(pkg_dir, cmd_name))
-
     package_name = metadata.get("package_name") or metadata.get("publication") or metadata.get("name") or cmd_name or os.path.basename(pkg_dir)
-
     project_name = _sanitize_python_name(package_name)
-
     entry = metadata.get("entry") or metadata.get("main") or metadata.get("script") or next((candidate for candidate in ("__main__.py", "main.py", "app.py", "run.py") if os.path.isfile(os.path.join(pkg_dir, candidate))), None)
-
     if entry is None:
-
         raise ValueError(f"No valid entry script found in package directory '{pkg_dir}'")
-
     package_dir = os.path.abspath(pkg_dir)
-
     projected_root = os.path.basename(package_dir) or "sourcegen-app"
-
     projected_name = _sanitize_python_name(projected_root)
-
     dependency_entries = metadata.get("dependencies") or []
-
     dependencies_line = f"dependencies = [{_toml_list(dependency_entries)}]\n" if dependency_entries else ""
-
     wrapper_path = os.path.join(package_dir, "sourcegen_entry.py")
-
     with open(wrapper_path, "w", encoding="utf-8") as handle:
-
         handle.write(_build_entry_wrapper(entry, package_dir))
-
-
     pyproject_path = os.path.join(package_dir, "pyproject.toml")
-
     with open(pyproject_path, "w", encoding="utf-8") as handle:
-
         handle.write(
-
             "[build-system]\n"
-
             "requires = [\"setuptools>=68\"]\n"
-
             "build-backend = \"setuptools.build_meta\"\n\n"
-
             "[project]\n"
-
             f"name = \"{project_name}\"\n"
-
             f"version = \"{metadata.get('version', '0.1.0')}\"\n"
-
             f"description = \"{metadata.get('description', metadata.get('name', projected_name))}\"\n"
-
             f"requires-python = \"{metadata.get('requires-python', '>=3.12')}\"\n"
-
             + (dependencies_line + "\n" if dependencies_line else "") +
-
             "\n[project.scripts]\n"
-
             f"{cmd_name} = \"sourcegen_entry:main\"\n\n"
-
             "[tool.setuptools]\n"
-
             "py-modules = [\"sourcegen_entry\"]\n"
-
         )
-
     return pyproject_path
 
-
 def _install_via_pipx(pkg_dir: str, command_name: str | None = None, metadata: dict | None = None) -> dict:
-
     if shutil.which("pipx") is None:
-
         raise RuntimeError("pipx is not installed or not on PATH")
-
-
     if metadata is None:
-
         metadata = _load_sourcepkg(pkg_dir) if os.path.isfile(os.path.join(pkg_dir, ".sourcepkg")) else _infer_package_metadata(pkg_dir, command_name)
-
     else:
-
         metadata = dict(metadata)
-
-
     resolved_name = command_name or metadata.get("command") or metadata.get("name") or os.path.basename(pkg_dir)
-
     metadata["command"] = resolved_name
-
     metadata["name"] = resolved_name
-
     pyproject_path = _write_pyproject_toml(pkg_dir, resolved_name, metadata)
-
     env = os.environ.copy()
-
     try:
-
         subprocess.run(["pipx", "uninstall", resolved_name], capture_output=True, text=True, env=env, check=False)
-
         install_result = subprocess.run(["pipx", "install", pkg_dir, "--force"], capture_output=True, text=True, env=env, check=False)
-
         if install_result.returncode != 0:
-
             output = (install_result.stderr or install_result.stdout or "").strip()
-
             lowered = output.lower()
-
             if any(token in lowered for token in ("already installed", "already exists", "already installed in pipx", "use 'pipx reinstall")):
-
                 reinstall_result = subprocess.run(["pipx", "reinstall", resolved_name], capture_output=True, text=True, env=env, check=False)
-
                 if reinstall_result.returncode != 0:
-
                     reinstall_output = (reinstall_result.stderr or reinstall_result.stdout or "").strip()
-
                     lowered = reinstall_output.lower()
-
                     if "nothing to reinstall" in lowered or "not installed" in lowered or "no app" in lowered:
-
                         return {
-
                             "command_name": resolved_name,
-
                             "source_path": pkg_dir,
-
                             "root": pkg_dir,
-
                             "target": os.path.join(pkg_dir, metadata.get("entry") or "__main__.py"),
-
                             "metadata": metadata,
-
                         }
-
                     if not reinstall_output:
-
                         reinstall_output = f"pipx exited with status {reinstall_result.returncode} while reinstalling '{resolved_name}'."
-
                     raise RuntimeError(
-
                         f"Could not reinstall '{resolved_name}' via pipx. pipx reported: {reinstall_output}"
-
                     )
-
                 return {
-
                     "command_name": resolved_name,
-
                     "source_path": pkg_dir,
-
                     "root": pkg_dir,
-
                     "target": os.path.join(pkg_dir, metadata.get("entry") or "__main__.py"),
-
                     "metadata": metadata,
-
                 }
-
             if not output:
-
                 output = f"pipx exited with status {install_result.returncode} while installing '{resolved_name}'."
-
             raise RuntimeError(f"Could not install '{resolved_name}' via pipx. pipx reported: {output}")
-
     finally:
-
         for cleanup_path in (pyproject_path, os.path.join(pkg_dir, "sourcegen_entry.py")):
-
             if os.path.exists(cleanup_path):
-
                 os.remove(cleanup_path)
-
-
     if os.path.isfile(os.path.join(pkg_dir, ".sourcepkg")):
-
         target = _resolve_sourcepkg_entry(pkg_dir, metadata)
-
     else:
-
         entry_name = metadata.get("entry") or metadata.get("main") or metadata.get("script")
-
         fallback = "__main__.py" if os.path.isfile(os.path.join(pkg_dir, "__main__.py")) else "main.py"
-
         target = os.path.join(pkg_dir, entry_name or fallback)
-
-
     return {
-
         "command_name": resolved_name,
-
         "source_path": pkg_dir,
-
         "root": pkg_dir,
-
         "target": target,
-
         "metadata": metadata,
-
     }
 
-
 async def install_target(path: str, command_name: str | None = None, no_deps: bool = False) -> dict:
-
     pkg_dir = os.path.abspath(path)
-
     install_root = os.path.abspath(INTERNAL_PACKAGES_DIR)
-
     try:
-
         common_root = os.path.commonpath([install_root, pkg_dir])
-
     except ValueError:
-
         common_root = ""
-
     if common_root != install_root:
-
         raise ValueError(
-
             "Only cached installer-managed directories may be installed via pipx. "
-
             "Direct local package installs are disabled by default."
-
         )
-
-
     publication_dir_name = os.path.basename(pkg_dir)
-
     parsed = _parse_installed_publication_dir(publication_dir_name)
-
     if parsed is None:
-
         raise ValueError(
-
             "Only cached installer-managed directories may be installed via pipx. "
-
             "Direct local package installs are disabled by default."
-
         )
-
-
     publication_name, release = parsed
-
     return install_cached_publication(publication_name, release, command_name=command_name)
 
-
 def install_cached_publication(pub: str, rel: str = "latest", *, command_name: str | None = None, cache_root: str | None = None) -> dict:
-
     publication_target = pub.strip().strip("/")
-
     subpath: str | None = None
-
     if "/" in publication_target:
-
         publication_name, subpath = publication_target.split("/", 1)
-
     else:
-
         publication_name = publication_target
-
-
     resolved_pub = parsepub(publication_name)
-
     target_root = cache_root or INTERNAL_PACKAGES_DIR
-
     publication_dir = os.path.join(target_root, _publication_leaf(resolved_pub, rel))
-
     if not os.path.isdir(publication_dir):
-
         raise FileNotFoundError(f"Publication '{resolved_pub}' release '{rel}' is not installed in the internal cache at '{publication_dir}'.")
-
-
     entry_target = _resolve_cached_publication_entry(publication_dir, subpath)
-
     relative_entry = os.path.relpath(entry_target, publication_dir).replace(os.sep, "/")
-
     raw_sourcepkg = _read_raw_sourcepkg(publication_dir) if os.path.isfile(os.path.join(publication_dir, ".sourcepkg")) else {}
-
     sourcepkg_metadata = _load_sourcepkg(publication_dir) if os.path.isfile(os.path.join(publication_dir, ".sourcepkg")) else {}
-
-    publication_command_name = command_name or raw_sourcepkg.get("command") or raw_sourcepkg.get("name") or sourcepkg_metadata.get("command") or sourcepkg_metadata.get("name") or resolved_pub.lower()
-
+    publication_command_name = command_name or raw_sourcepkg.get("command") or raw_sourcepkg.get("name") or sourcepkg_metadata.get("command") or sourcepkg_metadata.get("name") or getAddressInfo(resolved_pub)["distro"].lower()
     metadata = _infer_package_metadata(publication_dir, publication_command_name, entry=relative_entry)
-
     metadata.update(sourcepkg_metadata)
-
     metadata["command"] = publication_command_name
-
     metadata["name"] = publication_command_name
-
-    metadata["package_name"] = resolved_pub.lower()
-
+    metadata["package_name"] = getAddressInfo(resolved_pub)["distro"].lower()
     metadata["publication"] = resolved_pub
-
     metadata["dependencies"] = _dependency_list(metadata.get("dependencies"), include_installer=bool(INSTALLER_PACKAGE_DEPENDENCY))
-
     result = _install_via_pipx(publication_dir, publication_command_name, metadata=metadata)
-
     result["publication"] = resolved_pub
-
     result["release"] = rel
-
     result["entry_path"] = relative_entry
-
     return result
 
-
 def uninstall_target(command_name: str) -> dict:
-
     requested_name = (command_name or "").strip()
-
     package_name = parsepub(requested_name)
-
     if shutil.which("pipx") is None:
-
         raise RuntimeError("pipx is not installed or not on PATH.")
-
-
     result = subprocess.run(["pipx", "uninstall", package_name], capture_output=True, text=True)
-
     if result.returncode == 0:
-
         return {
-
             "command_name": requested_name,
-
             "package_name": package_name,
-
             "removed": True,
-
             "path": None,
-
         }
-
-
     output = (result.stderr or result.stdout or "").strip()
-
     if not output:
-
         output = f"The package '{package_name}' is not installed or could not be removed."
-
     if any(token in output.lower() for token in ("not installed", "not found", "no app")):
-
         raise RuntimeError(f"The command '{requested_name}' is not installed in pipx, so there was nothing to remove.")
-
     raise RuntimeError(f"The package '{package_name}' could not be removed. pipx reported: {output}")
-
 
 @dataclass(slots=True)
 
 class InstallResult:
-
     status: str
-
     lines: list[str]
-
     exit_code: int = 0
 
-
 def _cli(text: str, color: str = "", bold: bool = False) -> str:
-
     prefix: str = f"{CLI_BOLD if bold else ''}{color}"
-
     return f"{prefix}{text}{CLI_RESET if prefix else ''}"
 
-
 def _print_status(label: str, message: str, tone: str = "info") -> None:
-
     palette: dict[str, str] = {
-
         "info": CLI_INFO,
-
         "success": CLI_SUCCESS,
-
         "warning": CLI_WARNING,
-
         "error": CLI_ERROR,
-
         "muted": CLI_DIM
-
     }
-
     color: str = palette.get(tone, "")
-
     print(f"{_cli(f'[{label}]', color, bold=True)} {message}")
 
-
 def _print_section(title: str) -> None:
-
     print(_cli(title, CLI_BOLD))
 
-
 def _print_command(signature: str, description: str) -> None:
-
     print(f"  {_cli(signature, CLI_INFO)} {_cli('-', CLI_DIM)} {description}")
 
-
 def _print_help() -> None:
-
     print(_cli(f"{NAME} v{VERSION}", CLI_INFO, bold=True))
-
     print(_cli(DESCRIPTION, CLI_DIM))
-
     print()
-
     _print_section("Usage")
-
     print(f"  {COMMAND} <command> [args]")
-
     print()
-
     _print_section("General")
-
     _print_command("get <publication> [release]", "Download a package using the configured source.")
-
     _print_command("rm <publication> [release]", "Delete one release or all installed releases for a publication.")
-
     _print_command("install <publication> [release]", "Install a cached package via pipx.")
-
     _print_command("uninstall <publication> [release]", "Uninstall an installed package by its publication name and optional release from the pipx cache.")
-
     _print_command("list", "List installed publications in the installer's internal cache.")
-
     _print_command("cache", "Show the total cache size and per-publication cache usage.")
-
     print()
-
     _print_section("Documentation")
-
     _print_command("readme", "Show the installer README.")
-
     _print_command("license", "Show the installer license.")
-
     _print_command("help", "Show this help message.")
 
-
 def parsepub(pub: str) -> str:
-
     value = (pub or "").strip()
-
     if not value:
-
         return value
-
     lowered = value.lower()
-
     if lowered in PUBLICATION_CACHE:
-
         return PUBLICATION_CACHE[lowered]
-
     if lowered in REVERSE_PUBLICATION_CACHE:
-
         return lowered
-
     return value
 
-
 def _publication_dirname(pub: str, rel: str, root: str = "packages") -> str:
-
     return os.path.join(root, _publication_leaf(pub, rel))
 
-
 def _release_token(rel: str) -> str:
-
     return rel.replace(".", "_").replace("-", "_")
 
-
 def _print_install_result(result: InstallResult, color: bool = True) -> None:
-
     labels: dict[str, str] = {
-
         "info": "skip",
-
         "success": "done",
-
         "error": "fail",
-
     }
-
     palette: dict[str, str] = {
-
         "info": CLI_INFO,
-
         "success": CLI_SUCCESS,
-
         "error": CLI_ERROR,
-
     }
-
     prefix: str = palette.get(result.status, "") if color else ""
-
     label: str = labels.get(result.status, "info")
-
     for line in result.lines:
-
         if prefix:
-
             print(f"{_cli(f'[{label}]', prefix, bold=True)} {line}")
-
         else:
-
             print(f"[{label}] {line}")
-
 
 def _remove_publication_versions(install_root: str, pub: str, rel: str | None = None) -> int:
     if not os.path.isdir(install_root):
@@ -898,7 +501,6 @@ def _remove_publication_versions(install_root: str, pub: str, rel: str | None = 
             deleted += 1
     return deleted
 
-
 def _parse_installed_publication_dir(dirname: str) -> tuple[str, str] | None:
     # A metadata marker permits arbitrary product names and release formats.
     marker = os.path.join(INTERNAL_PACKAGES_DIR, dirname, ".sourcegen-package.json")
@@ -916,298 +518,153 @@ def _parse_installed_publication_dir(dirname: str) -> tuple[str, str] | None:
             return publication, (suffix.replace("_", ".") if suffix else "latest")
     return dirname, "latest"  # Unversioned generic cache directory
 
-
 def _queue_install_to_root(pub: str, rel: str, install_root: str, reinstall: bool = True, work_dir: str = ".", emit: bool = True, error: bool = False) -> asyncio.Task:
-
     resolved_pub: str = parsepub(pub)
-
     key: tuple[str, str, str] = (resolved_pub.lower(), rel, os.path.realpath(install_root))
-
     if key in running_installs:
-
         if emit:
-
             _print_status("wait", f"Already queued {resolved_pub.lower()} {rel} -> {install_root}", "muted")
-
         return running_installs[key]
-
-
     if emit:
-
         _print_status("queue", f"{resolved_pub.lower()} {rel} -> {install_root}", "info")
-
     task: asyncio.Task = asyncio.create_task(asyncio.to_thread(_install_publication_to_root, resolved_pub, rel, install_root, reinstall, work_dir, emit, error))
-
     running_installs[key] = task
-
-
     def cleanup(completed_task: asyncio.Task, install_key: tuple[str, str, str] = key) -> None:
-
         if running_installs.get(install_key) is completed_task:
-
             running_installs.pop(install_key, None)
-
-
     task.add_done_callback(cleanup)
-
     return task
 
-
 async def _reinstall_project_libraries(project: str) -> None:
-
     install_root: str = os.path.join(project, "libraries", "packages")
-
     if not os.path.isdir(install_root):
-
         _print_status("miss", f"No library directory found at '{install_root}'.", "warning")
-
         raise SystemExit(1)
-
-
     entries: list[str] = [item for item in os.listdir(install_root) if os.path.isdir(os.path.join(install_root, item))]
-
     if not entries:
-
         _print_status("info", f"No installed libraries found in '{install_root}'.", "muted")
-
         return
-
-
     tasks: list[asyncio.Task] = []
-
     ignored: int = 0
-
     for entry in entries:
-
         parsed: tuple[str, str] | None = _parse_installed_publication_dir(entry)
-
         if parsed is None:
-
             ignored += 1
-
             _print_status("skip", f"Could not parse installed library directory '{entry}'.", "warning")
-
             continue
-
         pub, rel = parsed
-
         tasks.append(_queue_install_to_root(pub, rel, install_root, True))
-
-
     if not tasks:
-
         _print_status("miss", "No reinstallable libraries were found.", "warning")
-
         if ignored:
-
             _print_status("info", f"Ignored {ignored} unrecognized directory(ies).", "muted")
-
         return
-
-
     results: list[InstallResult] = await asyncio.gather(*tasks)
-
     failures: int = 0
-
     for result in results:
-
         _print_install_result(result)
-
         failures += int(bool(result.exit_code))
-
     if failures:
-
         _print_status("fail", f"Library reinstall finished with {failures} failure{'s' if failures != 1 else ''}.", "error")
-
         raise SystemExit(1)
-
-
     _print_status("done", f"Reinstalled {len(results)} librar{'y' if len(results) == 1 else 'ies'} from {install_root}.", "success")
 
-
 def _install_publication(pub: str, rel: str, reinstall: bool = True) -> InstallResult:
-
     return _install_publication_to_root(pub, rel, "packages", reinstall)
 
-
 def _install_publication_to_root(pub: str, rel: str, install_root: str, reinstall: bool = True, work_dir: str = ".", emit: bool = True, error: bool = False) -> InstallResult:
-
     pub = parsepub(pub)
-
     pub_lower: str = pub.lower()
-
     dirname: str = os.path.join(install_root, _publication_leaf(pub, rel))
-
     release_token: str = _release_token(rel)
-
     archive_path: str = os.path.join(work_dir, f"{pub_lower}-{release_token}.zip")
-
     extract_dir: str = os.path.join(work_dir, f"{pub_lower}-repo-{release_token}")
-
     custom_result = custom_install_package(pub, rel, install_root, work_dir)
-
     if custom_result is not None:
         if not custom_result.exit_code:
             os.makedirs(dirname, exist_ok=True)
             with open(os.path.join(dirname, ".sourcegen-package.json"), "w", encoding="utf-8") as marker:
                 json.dump({"package": pub, "release": rel}, marker)
         return custom_result
-
     url: str = resolve_download_url(pub, rel)  # TODO: configure resolver above
-
     not_found: bool = False
-
     try:
-
         if os.path.exists(dirname) and not reinstall:
-
             if emit:
-
                 _print_status("info", f"{pub_lower} {rel}: Publication is already installed.", "muted")
-
             return InstallResult("info", [f"{pub_lower} {rel}: Publication is already installed."])
-
         os.makedirs(work_dir, exist_ok=True)
-
         try:
-
             urlretrieve(
-
                 url,
-
                 archive_path,
-
             )
-
         except urllib.error.HTTPError:
-
             not_found = True
-
             return InstallResult(
-
                 "error",
-
                 [f"{pub_lower} {rel}: Could not find this release. Are you sure you spelled it right?"],
-
                 1,
-
             )
-
-
         with zipfile.ZipFile(archive_path, "r") as zip_ref:
-
             zip_ref.extractall(extract_dir)
-
         os.makedirs(install_root, exist_ok=True)
-
         if os.path.exists(dirname):
-
             shutil.rmtree(dirname)
-
-
         source_root: str = resolve_extracted_source(extract_dir, pub, rel)
-
         if not os.path.isdir(source_root):
-
             raise ValueError(f"Download resolver returned invalid source directory: {source_root}")
-
         shutil.move(source_root, dirname)
-
         with open(os.path.join(dirname, ".sourcegen-package.json"), "w", encoding="utf-8") as marker:
             json.dump({"package": pub, "release": rel}, marker)
-
         if emit:
-
             _print_status("done", f"{pub_lower} {rel}: Installation complete!", "success")
-
         return InstallResult("success", [f"{pub_lower} {rel}: Installation complete!"])
-
     except Exception:
-
         return InstallResult(
-
             "error",
-
             [line for line in traceback.format_exc().split("\n") if line.strip()],
-
             1,
-
         )
-
     finally:
-
         if os.path.exists(extract_dir):
-
             shutil.rmtree(extract_dir)
-
         if os.path.exists(archive_path):
-
             os.remove(archive_path)
-
         if error and not_found:
-
             raise FileNotFoundError(f"Could not find release '{rel}' for publication '{pub_lower}'.")
 
-
 def _queue_install(pub: str, rel: str, reinstall: bool = True, install_root: str = "packages", work_dir: str = ".", emit: bool = True, error: bool = False) -> asyncio.Task:
-
     return _queue_install_to_root(pub, rel, install_root, reinstall, work_dir, emit, error=error)
 
-
 async def install_async(pub: str, rel: str, reinstall: bool = True, color: bool = True, emit: bool = True, fatal: bool = True, install_root: str = "packages", work_dir: str = ".", error: bool = False) -> InstallResult:
-
     result: InstallResult = await _queue_install(pub, rel, reinstall, install_root, work_dir, emit, error)
-
     if emit:
-
         _print_install_result(result, color)
-
     if fatal and result.exit_code:
-
         raise SystemExit(result.exit_code)
-
     return result
 
-
 def _run_coroutine_from_sync(coro):
-
     result: dict[str, object] = {}
-
     error: dict[str, BaseException] = {}
-
-
     def runner() -> None:
-
         try:
-
             result["value"] = asyncio.run(coro)
-
         except BaseException as exc:  # pragma: no cover - exercised via tests
-
             error["value"] = exc
-
-
     thread = threading.Thread(target=runner, daemon=True)
-
     thread.start()
-
     thread.join()
-
-
     if "value" in error:
-
         raise error["value"]
-
     return result["value"]
-
 
 class InvalidDistributionNameError(ValueError):
     """Raised when an address contains an invalid distribution name."""
 
-
 class InvalidVersionError(ValueError):
     """Raised when an address contains an invalid release version."""
-
 
 def getAddressInfo(address: str) -> dict:
     address = address.strip()
@@ -1245,7 +702,6 @@ def getAddressInfo(address: str) -> dict:
         "type": addr_type
     }
 
-
 @dataclass(slots=True)
 class Result:
     status: str = "info"
@@ -1254,11 +710,9 @@ class Result:
     success: bool = False
     message: str = ""
 
-
 def cli(text: str, color: str = "", bold: bool = False) -> str:
     prefix: str = f"{CLI_BOLD if bold else ''}{color}"
     return f"{prefix}{text}{CLI_RESET if prefix else ''}"
-
 
 def printStatus(label: str, message: str, tone: str = "info") -> None:
     palette: dict[str, str] = {
@@ -1271,14 +725,11 @@ def printStatus(label: str, message: str, tone: str = "info") -> None:
     color: str = palette.get(tone, "")
     print(f"{cli(f'[{label}]', color, bold=True)} {message}")
 
-
 def printSection(title: str) -> None:
     print(cli(title, CLI_BOLD))
 
-
 def printCommand(signature: str, description: str) -> None:
     print(f"  {cli(signature, CLI_INFO)} {cli('-', CLI_DIM)} {description}")
-
 
 def printResult(result: Result, color: bool = True) -> None:
     labels: dict[str, str] = {
@@ -1304,7 +755,6 @@ def printResult(result: Result, color: bool = True) -> None:
         else:
             print(f"[{label}] {line}")
 
-
 def printDistroLocationError(address: str, exc: Exception) -> None:
     """Print a friendly CLI error and retain diagnostics in the debug log."""
     logger.debug("Could not locate distribution %r.", address, exc_info=exc)
@@ -1313,13 +763,11 @@ def printDistroLocationError(address: str, exc: Exception) -> None:
     ) or f"Could not locate distribution '{address}'."
     printStatus("fail", message, "error")
 
-
 def localRegistryPath(registry: str) -> str:
     path: str = os.path.expanduser(registry)
     if not os.path.isabs(path):
         path = os.path.abspath(os.path.join(os.getcwd(), path))
     return os.path.join(path, "dstbs")
-
 
 def safeExtractZip(archive: str, destination: str) -> None:
     destination_abs: str = os.path.abspath(destination)
@@ -1329,7 +777,6 @@ def safeExtractZip(archive: str, destination: str) -> None:
             if os.path.commonpath((destination_abs, target)) != destination_abs:
                 raise RuntimeError(f"Unsafe archive member: {member.filename}")
         archive_file.extractall(destination)
-
 
 def safeExtractTar(archive: str, destination: str) -> None:
     destination_abs: str = os.path.abspath(destination)
@@ -1341,7 +788,6 @@ def safeExtractTar(archive: str, destination: str) -> None:
             if member.issym() or member.islnk():
                 raise RuntimeError(f"Links are not allowed in archives: {member.name}")
         archive_file.extractall(destination)
-
 
 def findLocalRelease(local_root: str, author: str, distro: str, version: str) -> tuple[str, str]:
     candidates: list[str] = []
@@ -1379,7 +825,6 @@ def findLocalRelease(local_root: str, author: str, distro: str, version: str) ->
         f"Local distribution '{author}.{distro}={version}' was not found in '{local_root}'."
     )
 
-
 def registryBaseUrl(registry: str) -> str:
     """Build the API base URL for a registry address."""
     normalized: str = registry.strip()
@@ -1388,7 +833,6 @@ def registryBaseUrl(registry: str) -> str:
     if normalized.startswith(("127.0.0.1", "localhost")):
         return f"http://{normalized}".rstrip("/")
     return f"https://dstbs.{normalized}".rstrip("/")
-
 
 def registryNetworkError(address: str, registry: str, exc: Exception) -> Result:
     error_text: str = str(exc)
@@ -1421,13 +865,11 @@ def registryNetworkError(address: str, registry: str, exc: Exception) -> Result:
         exit_code=1,
     )
 
-
 def findDistroLocation(address: str) -> str:
     info: dict = getAddressInfo(address)
     author: str = info["author"]
     distro: str = info["distro"]
     version: str = info["version"]
-
     name_pattern: str = r"[a-z0-9][a-z0-9_-]*"
     invalid_names: list[str] = [
         name for name in (author, distro)
@@ -1437,7 +879,6 @@ def findDistroLocation(address: str) -> str:
         raise InvalidDistributionNameError(
             f"Invalid distribution name '{author}.{distro}'."
         )
-
     if (
         not version
         or version != "latest"
@@ -1446,9 +887,7 @@ def findDistroLocation(address: str) -> str:
         raise InvalidVersionError(
             f"Invalid version '{version}'. Use 'latest' or a version containing only letters, numbers, '.', '_' and '-'."
         )
-
     display_name: str = f"{author}.{distro}={version}"
-
     if info["type"] == "local":
         local_root: str = localRegistryPath(info["registry"])
         try:
@@ -1488,7 +927,6 @@ def findDistroLocation(address: str) -> str:
                 "Expected: .tar.gz or .tgz"
             )
         return os.path.abspath(source_path)
-
     base_url: str = registryBaseUrl(info["registry"])
     distribution_url: str = (
         f"{base_url}/v1/{urllib.parse.quote(author)}/"
@@ -1529,13 +967,11 @@ def findDistroLocation(address: str) -> str:
         "  Expected: a .tar.gz or .tgz artifact"
     )
 
-
 def viewDistro(address: str) -> Result:
     info = getAddressInfo(address)
     author = info["author"]
     distro = info["distro"]
     version = info["version"]
-
     try:
         if info["type"] == "local":
             source_path, resolved_version = findLocalRelease(
@@ -1575,7 +1011,6 @@ def viewDistro(address: str) -> Result:
                     f"Size: {artifact.get('size', 0)} bytes",
                     f"SHA-256: {artifact.get('sha256', '')}",
                 ])
-
         return Result(
             status="success",
             success=True,
@@ -1612,7 +1047,6 @@ def viewDistro(address: str) -> Result:
         message = f"Failed to view {address}: {exc}"
         return Result(status="error", success=False, lines=[message], message=message, exit_code=1)
 
-
 def updateHomeRegistry(registry: str) -> None:
     config_data: dict = {}
     if os.path.isfile(str(CONFIG_PATH)):
@@ -1623,7 +1057,6 @@ def updateHomeRegistry(registry: str) -> None:
         json.dump(config_data, config_file, indent=4)
         config_file.write("\n")
 
-
 def getStoredAuth() -> tuple[str | None, str | None]:
     username = os.environ.get("DISTROBASE_AUTH_USER")
     if not username:
@@ -1631,10 +1064,8 @@ def getStoredAuth() -> tuple[str | None, str | None]:
             username = getconf("auth_user", None, config_path=CONFIG_PATH)
         except Exception:
             username = None
-
     if not username:
         return None, None
-
     password = os.environ.get("DISTROBASE_AUTH_PASSWORD")
     if not password and keyring is not None:
         try:
@@ -1643,9 +1074,7 @@ def getStoredAuth() -> tuple[str | None, str | None]:
             password = None
     if not password:
         password = _getFallbackPassword(username)
-
     return (username, password) if username and password else (None, None)
-
 
 def _fallbackAuthKey() -> bytes:
     """Load or create a local, file-permission-protected key used to obscure stored passwords."""
@@ -1654,7 +1083,6 @@ def _fallbackAuthKey() -> bytes:
             key: bytes = key_file.read()
         if key:
             return key
-
     key = os.urandom(32)
     with open(FALLBACK_AUTH_KEY_FILE, "wb") as key_file:
         key_file.write(key)
@@ -1664,10 +1092,8 @@ def _fallbackAuthKey() -> bytes:
         pass
     return key
 
-
 def _xorBytes(data: bytes, key: bytes) -> bytes:
     return bytes(byte ^ key[i % len(key)] for i, byte in enumerate(data))
-
 
 def _setFallbackPassword(username: str, password: str) -> None:
     key: bytes = _fallbackAuthKey()
@@ -1687,7 +1113,6 @@ def _setFallbackPassword(username: str, password: str) -> None:
     except OSError:
         pass
 
-
 def _getFallbackPassword(username: str) -> str | None:
     if not os.path.isfile(FALLBACK_AUTH_FILE):
         return None
@@ -1701,7 +1126,6 @@ def _getFallbackPassword(username: str) -> str | None:
     except Exception:
         return None
 
-
 def _deleteFallbackPassword(username: str) -> None:
     if not os.path.isfile(FALLBACK_AUTH_FILE):
         return
@@ -1714,7 +1138,6 @@ def _deleteFallbackPassword(username: str) -> None:
     except Exception:
         pass
 
-
 def _saveConfig(mutate) -> None:
     config_data: dict = {}
     if os.path.isfile(str(CONFIG_PATH)):
@@ -1724,7 +1147,6 @@ def _saveConfig(mutate) -> None:
     with open(str(CONFIG_PATH), "w") as config_file:
         json.dump(config_data, config_file, indent=4)
         config_file.write("\n")
-
 
 async def loginUser(username: str, password: str | None) -> Result:
     username = username.strip()
@@ -1736,7 +1158,6 @@ async def loginUser(username: str, password: str | None) -> Result:
             message="A username is required.",
             exit_code=1,
         )
-
     if not password:
         try:
             password = getpass.getpass("Password: ")
@@ -1749,7 +1170,6 @@ async def loginUser(username: str, password: str | None) -> Result:
                 message="Login cancelled.",
                 exit_code=1,
             )
-
     if not password:
         return Result(
             status="error",
@@ -1758,7 +1178,6 @@ async def loginUser(username: str, password: str | None) -> Result:
             message="A password is required.",
             exit_code=1,
         )
-
     registry = getconf("registry", "wednesware.org", config_path=CONFIG_PATH).strip()
     base_url = registryBaseUrl(registry)
     auth_url = f"{base_url}/v1/users/{urllib.parse.quote(username)}"
@@ -1767,7 +1186,6 @@ async def loginUser(username: str, password: str | None) -> Result:
         "Authorization",
         "Basic " + base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii"),
     )
-
     try:
         with urllib.request.urlopen(auth_req) as response:
             if response.status != 200:
@@ -1801,7 +1219,6 @@ async def loginUser(username: str, password: str | None) -> Result:
             message=f"Could not verify credentials for '{username}': {exc}",
             exit_code=1,
         )
-
     lines: list[str] = []
     if keyring is not None:
         try:
@@ -1821,13 +1238,10 @@ async def loginUser(username: str, password: str | None) -> Result:
             "Hint: install the 'keyring' package (`pip install keyring`) to store credentials in your OS's secure "
             "credential store instead of a locally protected file."
         )
-
     def mutate(config_data: dict) -> None:
         config_data["auth_user"] = username
         config_data.pop("auth_password", None)
-
     _saveConfig(mutate)
-
     lines.insert(0, f"Logged in as '{username}'.")
     return Result(
         status="success",
@@ -1836,7 +1250,6 @@ async def loginUser(username: str, password: str | None) -> Result:
         message=f"Logged in as '{username}'.",
         exit_code=0,
     )
-
 
 def logoutUser() -> Result:
     username, _ = getStoredAuth()
@@ -1848,20 +1261,16 @@ def logoutUser() -> Result:
             message="Not logged in.",
             exit_code=0,
         )
-
     if keyring is not None:
         try:
             keyring.delete_password("hydrogen-distrobase", username)
         except Exception:
             pass
     _deleteFallbackPassword(username)
-
     def mutate(config_data: dict) -> None:
         config_data.pop("auth_user", None)
         config_data.pop("auth_password", None)
-
     _saveConfig(mutate)
-
     return Result(
         status="success",
         success=True,
@@ -1869,7 +1278,6 @@ def logoutUser() -> Result:
         message=f"Logged out of '{username}'.",
         exit_code=0,
     )
-
 
 def whoami() -> Result:
     username, password = getStoredAuth()
@@ -1881,7 +1289,6 @@ def whoami() -> Result:
             message="Not logged in.",
             exit_code=1,
         )
-
     registry: str = getconf("registry", "wednesware.org", config_path=CONFIG_PATH)
     return Result(
         status="success",
@@ -1890,7 +1297,6 @@ def whoami() -> Result:
         message=f"Logged in as '{username}'.",
         exit_code=0,
     )
-
 
 def supportCommand() -> None:
     printSection("Support")
@@ -1901,22 +1307,18 @@ def supportCommand() -> None:
         print()
         printStatus("cancel", "Support message cancelled.", "warning")
         return
-
     if not message:
         printStatus("cancel", "No message entered.", "warning")
         return
-
     try:
         confirm: str = input(f"Send this message to {SUPPORT_EMAIL}? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         printStatus("cancel", "Support message cancelled.", "warning")
         return
-
     if confirm not in ("y", "yes"):
         printStatus("cancel", "Support message not sent.", "warning")
         return
-
     mailto_url: str = (
         f"mailto:{SUPPORT_EMAIL}"
         f"?subject={urllib.parse.quote(f'{NAME} Support Request')}"
@@ -1927,19 +1329,16 @@ def supportCommand() -> None:
     else:
         printStatus("fail", f"Could not open an email client. Please email {SUPPORT_EMAIL} manually.", "error")
 
-
 async def publishDistro(
     project_path: str,
     address: str,
     username: str | None = None,
     password: str | None = None,
 ) -> Result:
-
     try:
         project_path = os.path.abspath(
             os.path.expanduser(project_path)
         )
-
         if not os.path.isdir(project_path):
             return Result(
                 status="error",
@@ -1953,9 +1352,7 @@ async def publishDistro(
                 ),
                 exit_code=1,
             )
-
         info = getAddressInfo(address)
-
         if info["type"] != "registry" and info["type"] != "local":
             return Result(
                 status="error",
@@ -1968,11 +1365,9 @@ async def publishDistro(
                 ),
                 exit_code=1,
             )
-
         author = info["author"]
         distro = info["distro"]
         version = info["version"]
-
         if version == "latest":
             return Result(
                 status="error",
@@ -1985,32 +1380,26 @@ async def publishDistro(
                 ),
                 exit_code=1,
             )
-
         temp_dir = tempfile.mkdtemp(
             prefix="hydrogen-publish-"
         )
-
         try:
             # ---------------------------------------------------------
             # Build artifact
             # ---------------------------------------------------------
-
             archive = os.path.join(
                 temp_dir,
                 f"{version}.tar.gz",
             )
-
             printStatus(
                 "build",
                 f"Building project into {archive}...",
                 "info",
             )
-
             with tarfile.open(
                 archive,
                 "w:gz",
             ) as tar:
-
                 for root, dirs, files in os.walk(
                     project_path
                 ):
@@ -2025,85 +1414,68 @@ async def publishDistro(
                             "node_modules",
                         }
                     ]
-
                     for file_name in files:
                         file_path = os.path.join(
                             root,
                             file_name,
                         )
-
                         if os.path.abspath(
                             file_path
                         ) == os.path.abspath(
                             archive
                         ):
                             continue
-
                         arcname = os.path.relpath(
                             file_path,
                             project_path,
                         )
-
                         printStatus(
                             "pack",
                             f"Packing {arcname}",
                             "info",
                         )
-
                         tar.add(
                             file_path,
                             arcname=arcname,
                         )
-
             printStatus(
                 "done",
                 f"Build complete in {archive}",
                 "success",
             )
-
             if not os.path.isfile(archive):
                 raise RuntimeError(
                     "Build did not produce an archive."
                 )
-
             # ---------------------------------------------------------
             # Local registry
             # ---------------------------------------------------------
-
             if info["type"] == "local":
-
                 local_root = localRegistryPath(
                     info["registry"]
                 )
-
                 # TODO: does local when it shouldn't
-                
                 release_dir = os.path.join(
                     local_root,
                     author,
                     distro,
                 )
-
                 os.makedirs(
                     release_dir,
                     exist_ok=True,
                 )
-
                 destination = os.path.join(
                     release_dir,
                     f"{version}.tar.gz",
                 )
-
                 if os.path.exists(destination):
                     raise RuntimeError(
                         f"Release {version} already exists."
                     )
-
                 shutil.copy2(
                     archive,
                     destination,
                 )
-
                 return Result(
                     status="success",
                     success=True,
@@ -2131,41 +1503,32 @@ async def publishDistro(
                     ),
                     exit_code=0,
                 )
-
             # ---------------------------------------------------------
             # Remote registry
             # ---------------------------------------------------------
-
             registry = info["registry"]
-
             base_url = registryBaseUrl(
                 registry
             )
-
             url = (
                 f"{base_url}/v1/"
                 f"{urllib.parse.quote(author)}/"
                 f"{urllib.parse.quote(distro)}/"
                 f"{urllib.parse.quote(version)}"
             )
-
             boundary = (
                 "----HydrogenPublish"
                 + os.urandom(16).hex()
             )
-
             filename = os.path.basename(
                 archive
             )
-
             with open(
                 archive,
                 "rb",
             ) as file:
                 file_data = file.read()
-
             body = bytearray()
-
             body.extend(
                 (
                     f"--{boundary}\r\n"
@@ -2176,18 +1539,15 @@ async def publishDistro(
                     f"\r\n"
                 ).encode()
             )
-
             body.extend(
                 file_data
             )
-
             body.extend(
                 (
                     f"\r\n"
                     f"--{boundary}--\r\n"
                 ).encode()
             )
-
             username = username or getStoredAuth()[0]
             password = password or getStoredAuth()[1]
             headers = {
@@ -2204,14 +1564,12 @@ async def publishDistro(
                     f"{username}:{password}".encode("utf-8")
                 ).decode("ascii")
                 headers["Authorization"] = f"Basic {auth_value}"
-
             request = urllib.request.Request(
                 url,
                 data=bytes(body),
                 method="POST",
                 headers=headers,
             )
-
             printStatus(
                 "send",
                 (
@@ -2222,30 +1580,24 @@ async def publishDistro(
                 ),
                 "info",
             )
-
             with urllib.request.urlopen(
                 request
             ) as response:
-
                 response_data = json.load(
                     response
                 )
-
             artifact_name = response_data.get(
                 "name",
                 filename,
             )
-
             artifact_size = response_data.get(
                 "size",
                 os.path.getsize(archive),
             )
-
             artifact_sha256 = response_data.get(
                 "sha256",
                 "",
             )
-
             return Result(
                 status="success",
                 success=True,
@@ -2277,15 +1629,12 @@ async def publishDistro(
                 ),
                 exit_code=0,
             )
-
         finally:
             shutil.rmtree(
                 temp_dir,
                 ignore_errors=True,
             )
-
     except urllib.error.HTTPError as exc:
-
         try:
             detail = exc.read().decode(
                 "utf-8",
@@ -2293,7 +1642,6 @@ async def publishDistro(
             )
         except Exception:
             detail = str(exc)
-
         return Result(
             status="error",
             success=False,
@@ -2309,7 +1657,6 @@ async def publishDistro(
             ),
             exit_code=1,
         )
-
     except urllib.error.URLError as exc:
         return Result(
             status="error",
@@ -2322,7 +1669,6 @@ async def publishDistro(
             ),
             exit_code=1,
         )
-
     except Exception as exc:
         return Result(
             status="error",
@@ -2336,7 +1682,6 @@ async def publishDistro(
             exit_code=1,
         )
 
-
 async def registerUser(username: str, password: str, registry: str | None = None) -> Result:
     registry = (registry or getconf("registry", "wednesware.org", config_path=CONFIG_PATH)).strip()
     if not username or not password:
@@ -2347,7 +1692,6 @@ async def registerUser(username: str, password: str, registry: str | None = None
             message="A username and password are required.",
             exit_code=1,
         )
-
     base_url = registryBaseUrl(registry)
     req = urllib.request.Request(
         f"{base_url}/v1/users",
@@ -2355,7 +1699,6 @@ async def registerUser(username: str, password: str, registry: str | None = None
         method="POST",
         headers={"Content-Type": "application/json"},
     )
-
     try:
         with urllib.request.urlopen(req) as response:
             payload = json.load(response)
@@ -2365,7 +1708,6 @@ async def registerUser(username: str, password: str, registry: str | None = None
                 config_data = json.load(config_file)
         config_data["auth_user"] = username
         config_data.pop("auth_password", None)
-
         if keyring is not None:
             try:
                 keyring.set_password("hydrogen-distrobase", username, password)
@@ -2377,7 +1719,6 @@ async def registerUser(username: str, password: str, registry: str | None = None
                     message=f"Could not store credentials securely: {exc}",
                     exit_code=1,
                 )
-
         with open(str(CONFIG_PATH), "w") as config_file:
             json.dump(config_data, config_file, indent=4)
             config_file.write("\n")
@@ -2406,7 +1747,6 @@ async def registerUser(username: str, password: str, registry: str | None = None
             exit_code=1,
         )
 
-
 async def viewUser(username: str, registry: str | None = None) -> Result:
     registry = (registry or getconf("registry", "wednesware.org", config_path=CONFIG_PATH)).strip()
     if not username or not username.strip():
@@ -2417,13 +1757,11 @@ async def viewUser(username: str, registry: str | None = None) -> Result:
             message="A username is required.",
             exit_code=1,
         )
-
     base_url = registryBaseUrl(registry)
     req = urllib.request.Request(
         f"{base_url}/v1/users/{urllib.parse.quote(username.strip())}",
         method="GET",
     )
-
     try:
         with urllib.request.urlopen(req) as response:
             payload = json.load(response)
@@ -2431,9 +1769,7 @@ async def viewUser(username: str, registry: str | None = None) -> Result:
         if created_at:
             dt: datetime = datetime.fromisoformat(created_at)
             seconds = (datetime.now(timezone.utc) - dt).total_seconds()
-
             time_str: str = dt.strftime("%H:%M, %d %B %Y") if seconds < 86400 else dt.strftime("%d %B %Y")
-
             if seconds < 60:
                 time_since: str = f"{int(seconds)} seconds"
             elif seconds < 3600:
@@ -2446,7 +1782,6 @@ async def viewUser(username: str, registry: str | None = None) -> Result:
                 time_since: str = f"{int(seconds // 2592000)} months"
             else:
                 time_since: str = f"{int(seconds // 31536000)} years"
-
             lines = [
                 f"User {payload.get('username', username)} - member since {time_str} ({time_since})",
             ]
@@ -2479,7 +1814,6 @@ async def viewUser(username: str, registry: str | None = None) -> Result:
             exit_code=1,
         )
 
-
 async def listUsers(registry: str | None = None) -> Result:
     registry = (registry or getconf("registry", "wednesware.org", config_path=CONFIG_PATH)).strip()
     base_url = registryBaseUrl(registry)
@@ -2487,7 +1821,6 @@ async def listUsers(registry: str | None = None) -> Result:
         f"{base_url}/v1/users",
         method="GET",
     )
-
     try:
         with urllib.request.urlopen(req) as response:
             payload = json.load(response)
@@ -2519,7 +1852,6 @@ async def listUsers(registry: str | None = None) -> Result:
             message=f"Could not reach registry: {exc}",
             exit_code=1,
         )
-
 
 FALLBACK_AUTH_FILE = os.path.join(os.path.dirname(CONFIG_PATH), ".hydrogen_auth")
 FALLBACK_AUTH_KEY_FILE = os.path.join(os.path.dirname(CONFIG_PATH), ".hydrogen_auth_key")
@@ -2589,52 +1921,195 @@ async def fetchDistro(address: str) -> str:
         raise RuntimeError("; ".join(result.lines))
     return os.path.abspath(os.path.join(cache, _publication_leaf(address, "latest")))
 
+# Hydrogen-specific commands retained from the original Sourcegen fork.
+HYDROGEN_INSTALL_ROOT = "distrobase"
+
+def _hydrogen_dir(root: str, address: str) -> str:
+    return os.path.join(root, _publication_leaf(address, "latest"))
+
+def removeAddressVersions(install_root: str, address: str) -> int:
+    if not os.path.isdir(install_root):
+        return 0
+    if address.lower() == "all":
+        targets = [os.path.join(install_root, name) for name in os.listdir(install_root)]
+    else:
+        info = getAddressInfo(address)
+        prefix = re.sub(r"[^a-zA-Z0-9._-]", "_", f"{info['author']}.{info['distro']}@{info['registry']}=")
+        exact = _publication_leaf(address, "latest")
+        targets = [os.path.join(install_root, name) for name in os.listdir(install_root)
+                   if name == exact or (info['version'] == 'latest' and name.startswith(prefix))]
+    deleted = 0
+    for target in targets:
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+            deleted += 1
+    return deleted
+
+async def installDistro(address: str, reinstall: bool = True, install_root: str = HYDROGEN_INSTALL_ROOT,
+                        work_dir: str = ".", emit: bool = True) -> InstallResult:
+    return await install_async(address, "latest", reinstall=reinstall, install_root=install_root,
+                               work_dir=work_dir, emit=emit, fatal=False)
+
+# Command compatibility audit: keep current Sourcegen commands and Hydrogen-only commands.
+# Deprecated original-Sourcegen commands (getlib/getdep/forcegetdep/updlibs,
+# getinternal/rminternal/getdepinternal/stage/compat/extensions) are omitted.
+HYDROGEN_INSTALL_ROOT = "distrobase"
+
+def _cache_entries() -> list[tuple[str, str]]:
+    if not os.path.isdir(INTERNAL_PACKAGES_DIR):
+        return []
+    return sorted((name, os.path.join(INTERNAL_PACKAGES_DIR, name))
+                  for name in os.listdir(INTERNAL_PACKAGES_DIR)
+                  if os.path.isdir(os.path.join(INTERNAL_PACKAGES_DIR, name)) and name != "temp")
+
+def _tree_size(path: str) -> int:
+    total = 0
+    for folder, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += os.path.getsize(os.path.join(folder, name))
+            except OSError:
+                pass
+    return total
+
+def _human_size(size: int) -> str:
+    amount = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.1f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} TiB"
+
+def _remove_cached(address: str, release: str | None = None) -> int:
+    if not os.path.isdir(INTERNAL_PACKAGES_DIR):
+        return 0
+    if address.lower() == "all":
+        names = [name for name, _ in _cache_entries()]
+    else:
+        info = getAddressInfo(address)
+        # An explicit release only targets that version; otherwise remove all releases.
+        chosen = release or (info["version"] if info["version"] != "latest" else None)
+        prefix = re.sub(r"[^a-zA-Z0-9._-]", "_", f"{info['author']}.{info['distro']}@{info['registry']}=")
+        names = ([ _publication_leaf(address, chosen) ] if chosen else
+                 [name for name, _ in _cache_entries() if name.startswith(prefix)])
+    removed = 0
+    for name in names:
+        path = os.path.join(INTERNAL_PACKAGES_DIR, name)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+            removed += 1
+    return removed
+
 def printHelp() -> None:
-    print(f"{NAME} v{VERSION} — {DESCRIPTION}\nUsage: {COMMAND} <command> [args]\n")
-    for cmd, desc in (
-        ("view <address>", "Display a distribution's release and artifact details"),
-        ("url <address>", "Resolve a release archive URL or local artifact path"),
-        ("fetch <address>", "Fetch and extract a distribution to a temporary directory"),
+    print(cli(f"{NAME} v{VERSION}", CLI_INFO, bold=True))
+    print(DESCRIPTION)
+    print(f"\nUsage: {COMMAND} <command> [args]\n")
+    commands = (
+        ("get <address> [release]", "Download a Distrobase distribution into the local Sourcegen cache"),
+        ("rm <address|all> [release]", "Remove cached distribution releases"),
+        ("install <address> [release]", "Install a cached distribution via pipx"),
+        ("uninstall <command>", "Uninstall a pipx-installed application"),
+        ("list", "List cached distributions"),
+        ("cache", "Show per-distribution and total cache disk usage"),
+        ("view <address>", "Show distribution and artifact details"),
+        ("url <address>", "Resolve a release archive URL or local path"),
+        ("fetch <address>", "Fetch and extract to a temporary directory"),
         ("publish <project> <address>", "Publish a release to a Distrobase registry"),
         ("registry <registry>", "Set the default Distrobase registry"),
-        ("user create <username> <password>", "Create an account"),
-        ("user view <username>", "View user details"),
-        ("user list", "List registered users"),
-        ("user me", "Show the logged-in user"),
-        ("user login <username> [password]", "Log in"),
-        ("user logout", "Log out"),
+        ("user create|view|list|me|login|logout", "Manage Distrobase accounts"),
         ("support", "Contact Wednesware support"),
-        ("help", "Show this help"),
-    ): printCommand(cmd, desc)
+        ("readme", "Show bundled README"),
+        ("license", "Show bundled license"),
+        ("help", "Show commands"),
+    )
+    for cmd, desc in commands:
+        printCommand(cmd, desc)
 
 async def main() -> None:
     if len(sys.argv) == 1:
-        printHelp(); return
-    cmd, args = sys.argv[1], sys.argv[2:]
+        print(cli(f"{NAME} v{VERSION}", CLI_INFO, bold=True))
+        print(DESCRIPTION)
+        print(f"\nUsage: {COMMAND} <command> [args]\n")
+        print(f"Run {_cli('h2 help', CLI_INFO)} for a full command list.")
+        return
+    cmd, args = sys.argv[1].lower(), sys.argv[2:]
     try:
-        if cmd == "help": printHelp()
+        if cmd == "help" and not args:
+            printHelp()
+        elif cmd == "get" and len(args) in (1, 2):
+            result = await install_async(args[0], args[1] if len(args) == 2 else "latest",
+                                         install_root=INTERNAL_PACKAGES_DIR, work_dir=INTERNAL_TEMP_DIR,
+                                         fatal=False)
+            if result.exit_code:
+                raise RuntimeError("; ".join(result.lines))
+        elif cmd == "rm" and len(args) in (1, 2):
+            removed = _remove_cached(args[0], args[1] if len(args) == 2 else None)
+            printStatus("done", f"Removed {removed} cached distribution(s).", "success")
+        elif cmd == "install" and len(args) in (1, 2):
+            address, release = args[0], args[1] if len(args) == 2 else "latest"
+            if not os.path.isdir(os.path.join(INTERNAL_PACKAGES_DIR, _publication_leaf(address, release))):
+                raise FileNotFoundError(f"Distribution is not cached; run '{COMMAND} get {address} {release}' first.")
+            result = install_cached_publication(address, release)
+            printStatus("done", f"Installed '{result['command_name']}' via pipx.", "success")
+        elif cmd == "uninstall" and len(args) == 1:
+            result = uninstall_target(args[0])
+            printStatus("done", f"Uninstalled '{result['package_name']}' from pipx.", "success")
+        elif cmd == "list" and not args:
+            entries = _cache_entries()
+            if not entries:
+                printStatus("empty", "No cached distributions.", "muted")
+            for name, path in entries:
+                print(f"{name}  {path}")
+        elif cmd == "cache" and not args:
+            total = 0
+            for name, path in _cache_entries():
+                size = _tree_size(path)
+                total += size
+                print(f"{name}: {_human_size(size)}")
+            print(f"Total cache: {_human_size(total)}")
         elif cmd == "registry" and len(args) == 1:
-            updateHomeRegistry(args[0]); printStatus("done", f"Home registry set to '{args[0]}'", "success")
+            updateHomeRegistry(args[0])
+            printStatus("done", f"Home registry set to '{args[0]}'", "success")
         elif cmd == "view" and len(args) == 1:
-            result = viewDistro(args[0]); printResult(result)
-            if result.exit_code: raise SystemExit(result.exit_code)
-        elif cmd == "url" and len(args) == 1: print(findDistroLocation(args[0]))
-        elif cmd == "fetch" and len(args) == 1: print(await fetchDistro(args[0]))
-        elif cmd == "publish" and len(args) == 2:
-            result = await publishDistro(args[0], args[1]); printResult(result)
-            if result.exit_code: raise SystemExit(result.exit_code)
-        elif cmd == "support" and not args: supportCommand()
-        elif cmd == "user":
-            if args[:1] == ["create"] and len(args) == 3: result = await registerUser(args[1], args[2])
-            elif args[:1] == ["view"] and len(args) == 2: result = await viewUser(args[1])
-            elif args == ["list"]: result = await listUsers()
-            elif args == ["me"]: result = whoami()
-            elif args[:1] == ["login"] and len(args) in (2,3): result = await loginUser(args[1], args[2] if len(args) == 3 else None)
-            elif args == ["logout"]: result = logoutUser()
-            else: raise ValueError("Usage: h2 user create|view|list|me|login|logout ...")
+            result = viewDistro(args[0])
             printResult(result)
-            if result.exit_code: raise SystemExit(result.exit_code)
-        else: raise ValueError(f"Unknown command or incorrect arguments: {cmd}. Run '{COMMAND} help'.")
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        elif cmd == "url" and len(args) == 1:
+            print(findDistroLocation(args[0]))
+        elif cmd == "fetch" and len(args) == 1:
+            print(await fetchDistro(args[0]))
+        elif cmd == "publish" and len(args) == 2:
+            result = await publishDistro(args[0], args[1])
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        elif cmd == "support" and not args:
+            supportCommand()
+        elif cmd in ("readme", "license") and not args:
+            path = os.path.join(os.path.dirname(__file__), "README.md" if cmd == "readme" else "LICENSE")
+            with open(path, encoding="utf-8") as handle:
+                print(handle.read())
+        elif cmd == "user":
+            if args[:1] == ["create"] and len(args) == 3:
+                result = await registerUser(args[1], args[2])
+            elif args[:1] == ["view"] and len(args) == 2:
+                result = await viewUser(args[1])
+            elif args == ["list"]:
+                result = await listUsers()
+            elif args == ["me"]:
+                result = whoami()
+            elif args[:1] == ["login"] and len(args) in (2, 3):
+                result = await loginUser(args[1], args[2] if len(args) == 3 else None)
+            elif args == ["logout"]:
+                result = logoutUser()
+            else:
+                raise ValueError("Usage: h2 user create|view|list|me|login|logout ...")
+            printResult(result)
+            if result.exit_code:
+                raise SystemExit(result.exit_code)
+        else:
+            raise ValueError(f"Unknown command or incorrect arguments: {cmd}. Run '{COMMAND} help'.")
     except (ValueError, RuntimeError, FileNotFoundError, OSError, urllib.error.URLError) as exc:
         printStatus("fail", str(exc), "error")
         raise SystemExit(1) from exc
