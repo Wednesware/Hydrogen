@@ -12,7 +12,7 @@ except ImportError:
 SOURCEGEN_VERSION = "26.66"  # Upstream Sourcegen version (not Hydrogen's version)
 NAME = "Hydrogen"
 DESCRIPTION = "Wednesware Distrobase registry client and distribution installer."
-VERSION = "26.5"  # Hydrogen release; update when publishing a new release
+VERSION = "26.6"  # Hydrogen release; update when publishing a new release
 COMMAND = "h2"
 INTERNAL_PACKAGES_DIR = os.path.join(os.path.dirname(__file__), "packages")
 INTERNAL_TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
@@ -1220,22 +1220,29 @@ async def loginUser(username: str, password: str | None) -> Result:
             exit_code=1,
         )
     lines: list[str] = []
+    keyring_error: Exception | None = None
     if keyring is not None:
         try:
             keyring.set_password("hydrogen-distrobase", username, password)
         except Exception as exc:
+            keyring_error = exc
+    try:
+        _setFallbackPassword(username, password)
+    except Exception as exc:
+        if keyring_error is not None:
             return Result(
                 status="error",
                 success=False,
-                lines=[f"Could not store credentials securely: {exc}"],
-                message=f"Could not store credentials securely: {exc}",
+                lines=[f"Could not store credentials securely or in the local fallback store: {exc}"],
+                message=f"Could not store credentials securely or in the local fallback store: {exc}",
                 exit_code=1,
             )
-    else:
-        _setFallbackPassword(username, password)
-        hint = True
         lines.append(
-            "Hint: install the 'keyring' package (`pip install keyring`) to store credentials in your OS's secure "
+            f"Warning: could not write the local fallback credential cache: {exc}"
+        )
+    if keyring_error is not None:
+        lines.append(
+            "Hint: Install the 'keyring' package (`pip install keyring`) to store credentials in your OS's secure "
             "credential store instead of a locally protected file."
         )
     def mutate(config_data: dict) -> None:
@@ -1708,15 +1715,21 @@ async def registerUser(username: str, password: str, registry: str | None = None
                 config_data = json.load(config_file)
         config_data["auth_user"] = username
         config_data.pop("auth_password", None)
+        keyring_error: Exception | None = None
         if keyring is not None:
             try:
                 keyring.set_password("hydrogen-distrobase", username, password)
             except Exception as exc:
+                keyring_error = exc
+        try:
+            _setFallbackPassword(username, password)
+        except Exception as exc:
+            if keyring_error is not None:
                 return Result(
                     status="error",
                     success=False,
-                    lines=[f"Could not store credentials securely: {exc}"],
-                    message=f"Could not store credentials securely: {exc}",
+                    lines=[f"Could not store credentials securely or in the local fallback store: {exc}"],
+                    message=f"Could not store credentials securely or in the local fallback store: {exc}",
                     exit_code=1,
                 )
         with open(str(CONFIG_PATH), "w") as config_file:
