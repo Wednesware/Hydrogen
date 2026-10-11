@@ -12,7 +12,7 @@ except ImportError:
 SOURCEGEN_VERSION = "26.66"  # Upstream Sourcegen version (not Hydrogen's version)
 NAME = "Hydrogen"
 DESCRIPTION = "Wednesware Distrobase registry client and distribution installer."
-VERSION = "26.6"  # Hydrogen release; update when publishing a new release
+VERSION = "26.7"  # Hydrogen release; update when publishing a new release
 COMMAND = "h2"
 INTERNAL_PACKAGES_DIR = os.path.join(os.path.dirname(__file__), "packages")
 INTERNAL_TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
@@ -110,6 +110,25 @@ def _sanitize_python_name(value: str) -> str:
     sanitized = sanitized.strip("-_.")
     return sanitized or "sourcegen-app"
 
+def _module_name_from_metadata(metadata: dict | None, fallback: str) -> str:
+    candidates: list[str] = []
+    if metadata:
+        for key in ("package_name", "name", "command", "publication"):
+            value = metadata.get(key)
+            if value:
+                candidates.append(str(value))
+    candidates.append(fallback)
+    for candidate in candidates:
+        sanitized = re.sub(r"[^A-Za-z0-9_]+", "_", str(candidate).strip())
+        sanitized = sanitized.strip("_")
+        if not sanitized:
+            continue
+        if not sanitized[0].isalpha() and sanitized[0] != "_":
+            sanitized = f"package_{sanitized}"
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", sanitized):
+            return sanitized
+    return "sourcegen_app"
+
 def _toml_list(values: object) -> str:
     if values is None:
         return "[]"
@@ -142,13 +161,15 @@ def _dependency_list(values: object | None, *, include_installer: bool = False) 
             normalized.insert(0, nitro_key)
     return normalized
 
-def _build_entry_wrapper(entry: str, pkg_dir: str) -> str:
+def _build_entry_wrapper(entry: str, pkg_dir: str, metadata: dict | None = None) -> str:
     entry_value = entry.replace("\\", "/")
     pkg_root = os.path.abspath(pkg_dir)
-    package_name = os.path.basename(pkg_root).replace("-", "_").replace(".", "_") or "sourcegen_app"
+    fallback_name = os.path.basename(pkg_root).replace("-", "_").replace(".", "_") or "sourcegen_app"
+    package_name = _module_name_from_metadata(metadata, fallback_name)
     module_path = os.path.join(pkg_root, "__main__.py") if os.path.isfile(os.path.join(pkg_root, "__main__.py")) else os.path.join(pkg_root, "main.py")
     wrapper = f"""
 
+import importlib.util
 import os
 
 import runpy
@@ -161,21 +182,55 @@ ENTRY = {entry_value!r}
 
 PACKAGE_NAME = {package_name!r}
 
+PACKAGE_INIT = os.path.join(ROOT, "__init__.py")
+
 MODULE_PATH = {module_path!r}
+
+
+def _ensure_package_module() -> None:
+    if not os.path.isfile(PACKAGE_INIT):
+        return
+    if PACKAGE_NAME in sys.modules and getattr(sys.modules[PACKAGE_NAME], "__file__", None) == PACKAGE_INIT:
+        return
+    spec = importlib.util.spec_from_file_location(
+        PACKAGE_NAME,
+        PACKAGE_INIT,
+        submodule_search_locations=[ROOT],
+    )
+    if spec is None or spec.loader is None:
+        return
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[PACKAGE_NAME] = module
+    spec.loader.exec_module(module)
+
 
 def main() -> None:
     entry_path = os.path.join(ROOT, ENTRY)
     if os.path.isfile(entry_path):
-        if os.path.basename(entry_path) == "__main__.py" and os.path.isfile(os.path.join(ROOT, "__init__.py")):
+        if os.path.isfile(PACKAGE_INIT):
             sys.path.insert(0, os.path.dirname(ROOT))
-            runpy.run_module(PACKAGE_NAME, run_name="__main__")
-            return
+            _ensure_package_module()
+            basename = os.path.basename(entry_path)
+            if basename == "__main__.py":
+                runpy.run_module(PACKAGE_NAME, run_name="__main__")
+                return
+            stem = os.path.splitext(basename)[0]
+            if stem:
+                runpy.run_module(f"{{PACKAGE_NAME}}.{{stem}}", run_name="__main__")
+                return
         runpy.run_path(entry_path, run_name="__main__")
         return
     if os.path.isfile(MODULE_PATH):
         sys.path.insert(0, os.path.dirname(ROOT))
-        runpy.run_module(PACKAGE_NAME, run_name="__main__")
-        return
+        _ensure_package_module()
+        basename = os.path.basename(MODULE_PATH)
+        if basename == "__main__.py":
+            runpy.run_module(PACKAGE_NAME, run_name="__main__")
+            return
+        stem = os.path.splitext(basename)[0]
+        if stem:
+            runpy.run_module(f"{{PACKAGE_NAME}}.{{stem}}", run_name="__main__")
+            return
     raise FileNotFoundError(f"No entry script found for package at {{ROOT!r}}")
 
 """
@@ -236,7 +291,7 @@ def _write_pyproject_toml(pkg_dir: str, cmd_name: str, metadata: dict | None = N
     dependencies_line = f"dependencies = [{_toml_list(dependency_entries)}]\n" if dependency_entries else ""
     wrapper_path = os.path.join(package_dir, "sourcegen_entry.py")
     with open(wrapper_path, "w", encoding="utf-8") as handle:
-        handle.write(_build_entry_wrapper(entry, package_dir))
+        handle.write(_build_entry_wrapper(entry, package_dir, metadata))
     pyproject_path = os.path.join(package_dir, "pyproject.toml")
     with open(pyproject_path, "w", encoding="utf-8") as handle:
         handle.write(

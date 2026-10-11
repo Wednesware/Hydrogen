@@ -1,6 +1,6 @@
 [project]
 name = "wwh"
-version = "26.6"
+version = "26.7"
 description = "Sourcegen-based Distrobase installer."
 requires-python = ">=3.12"
 
