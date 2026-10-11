@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.request import urlretrieve
 try:
-    import keyring
+    import keyring # type: ignore
 except ImportError:
     keyring = None
 
@@ -1057,23 +1057,38 @@ def updateHomeRegistry(registry: str) -> None:
         json.dump(config_data, config_file, indent=4)
         config_file.write("\n")
 
+def normalizeUsername(username: str | None) -> str | None:
+    if username is None:
+        return None
+    username = username.strip()
+    return username.lower() if username else None
+
+
 def getStoredAuth() -> tuple[str | None, str | None]:
-    username = os.environ.get("DISTROBASE_AUTH_USER")
-    if not username:
+    raw_username = os.environ.get("DISTROBASE_AUTH_USER")
+    if not raw_username:
         try:
-            username = getconf("auth_user", None, config_path=CONFIG_PATH)
+            raw_username = getconf("auth_user", None, config_path=CONFIG_PATH)
         except Exception:
-            username = None
+            raw_username = None
+    if not raw_username:
+        return None, None
+    username = normalizeUsername(raw_username)
     if not username:
         return None, None
     password = os.environ.get("DISTROBASE_AUTH_PASSWORD")
     if not password and keyring is not None:
-        try:
-            password = keyring.get_password("hydrogen-distrobase", username)
-        except Exception:
-            password = None
+        for candidate in (raw_username, username):
+            if not candidate:
+                continue
+            try:
+                password = keyring.get_password("hydrogen-distrobase", candidate)
+            except Exception:
+                password = None
+            if password:
+                break
     if not password:
-        password = _getFallbackPassword(username)
+        password = _getFallbackPassword(username) or _getFallbackPassword(raw_username)
     return (username, password) if username and password else (None, None)
 
 def _fallbackAuthKey() -> bytes:
@@ -1149,7 +1164,7 @@ def _saveConfig(mutate) -> None:
         config_file.write("\n")
 
 async def loginUser(username: str, password: str | None) -> Result:
-    username = username.strip()
+    username = normalizeUsername(username)
     if not username:
         return Result(
             status="error",
@@ -1555,7 +1570,7 @@ async def publishDistro(
                     f"--{boundary}--\r\n"
                 ).encode()
             )
-            username = username or getStoredAuth()[0]
+            username = normalizeUsername(username) if username else getStoredAuth()[0]
             password = password or getStoredAuth()[1]
             headers = {
                 "Content-Type": (
@@ -1691,6 +1706,7 @@ async def publishDistro(
 
 async def registerUser(username: str, password: str, registry: str | None = None) -> Result:
     registry = (registry or getconf("registry", "wednesware.org", config_path=CONFIG_PATH)).strip()
+    username = normalizeUsername(username)
     if not username or not password:
         return Result(
             status="error",
